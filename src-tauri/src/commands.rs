@@ -11,7 +11,7 @@ use crate::path_utils::{get_drive_letter, is_ntfs_volume, get_free_space, format
 use crate::profiles::{ProfileManager, Profile};
 use crate::virtual_fs::{VirtualFileSystem, VirtualNode};
 use crate::workspace_watcher::WorkspaceWatcher;
-use tracing::info;
+use tracing::{info, warn};
 
 /// Application state for settings
 pub type SettingsState = Mutex<Option<Settings>>;
@@ -555,12 +555,83 @@ pub async fn revert_to_original(
     let vfs = VirtualFileSystem::new(settings.base_path.clone(), profile.workspace_dir);
     vfs.revert_to_original(&virtual_path)
         .map_err(|e| format!("Failed to revert to original: {}", e))?;
-    
-    // Remove blob reference if it was normalized
+
+    // Clean up blob reference if the file was normalized
     let cache_dir = settings.get_cache_directory();
     let cache = crate::blob_cache::BlobCache::new(cache_dir);
     
-    // Find and remove any blob reference for this workspace file
+    // Try to find and remove any blob reference for this workspace file
+    match crate::workspace_watcher::WorkspaceWatcher::find_blob_by_reference(
+        &cache, 
+        &profile_name, 
+        &virtual_path
+    ) {
+        Ok(blob_hash) => {
+            let blob_path = crate::blob_cache::BlobPath {
+                hash: blob_hash,
+                path: cache.get_blob_path(&blob_hash),
+            };
+            
+            match cache.remove_ref(&blob_path, &profile_name, &virtual_path) {
+                Ok(should_gc) => {
+                    info!("Removed blob reference for reverted file: {} | Should GC: {}", virtual_path, should_gc);
+                    
+                    // If blob has no more references, delete it immediately
+                    if should_gc && blob_path.path.exists() {
+                        if let Err(e) = std::fs::remove_file(&blob_path.path) {
+                            warn!("Failed to delete unreferenced blob after revert: {}", e);
+                        } else {
+                            debug!("Deleted unreferenced blob after revert: {}", blob_path.path.display());
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to remove blob reference for reverted file {}: {}", virtual_path, e);
+                }
+            }
+        }
+        Err(_) => {
+            // No blob reference found - this is normal for files that were never normalized
+            debug!("No blob reference found for reverted file: {} | Profile: {} (this is normal for non-normalized files)", 
+                   virtual_path, profile_name);
+        }
+    }    info!("Reverted to original: {} in profile: {}", virtual_path, profile_name);
+    Ok(())
+}
+
+/// Delete a workspace file that doesn't exist in base
+/// This removes workspace-only files and cleans up blob references
+#[tauri::command]
+pub async fn delete_workspace_file(
+    profile_name: String,
+    virtual_path: String,
+    state: State<'_, SettingsState>
+) -> Result<(), String> {
+    info!("Deleting workspace file: {} in profile: {}", virtual_path, profile_name);
+    
+    // Get settings to find paths
+    let settings_guard = state.lock().map_err(|e| format!("State lock error: {}", e))?;
+    let settings = settings_guard.as_ref()
+        .ok_or("Settings not loaded")?;
+    
+    let profiles_root = settings.data_root.join("profiles");
+    let manager = ProfileManager::new(profiles_root);
+    
+    let profile = manager.get_profile(&profile_name)
+        .map_err(|e| format!("Failed to get profile: {}", e))?
+        .ok_or(format!("Profile '{}' not found", profile_name))?;
+    
+    let workspace_file_path = profile.workspace_dir.join(&virtual_path);
+    
+    // Only delete if file exists in workspace
+    if !workspace_file_path.exists() {
+        return Err("File does not exist in workspace".to_string());
+    }
+    
+    // Remove blob reference before deleting file
+    let cache_dir = settings.get_cache_directory();
+    let cache = crate::blob_cache::BlobCache::new(cache_dir);
+    
     if let Ok(blob_hash) = crate::workspace_watcher::WorkspaceWatcher::find_blob_by_reference(
         &cache, 
         &profile_name, 
@@ -571,12 +642,143 @@ pub async fn revert_to_original(
             path: cache.get_blob_path(&blob_hash),
         };
         
-        let _ = cache.remove_ref(&blob_path, &profile_name, &virtual_path);
-        info!("Removed blob reference for reverted file: {}", virtual_path);
+        // Remove reference and check if blob should be GC'd
+        match cache.remove_ref(&blob_path, &profile_name, &virtual_path) {
+            Ok(should_gc) => {
+                info!("Removed blob reference for {}: should_gc={}", virtual_path, should_gc);
+                if should_gc {
+                    // Delete the blob immediately since no profiles reference it
+                    if blob_path.path.exists() {
+                        if let Err(e) = std::fs::remove_file(&blob_path.path) {
+                            warn!("Failed to delete unreferenced blob {}: {}", blob_path.path.display(), e);
+                        } else {
+                            debug!("Deleted unreferenced blob: {}", blob_path.path.display());
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("Failed to remove blob reference for {}: {}", virtual_path, e);
+            }
+        }
     }
     
-    info!("Reverted to original: {} in profile: {}", virtual_path, profile_name);
+    // Delete the workspace file
+    std::fs::remove_file(&workspace_file_path)
+        .map_err(|e| format!("Failed to delete workspace file: {}", e))?;
+    
+    info!("Deleted workspace file: {} in profile: {}", virtual_path, profile_name);
     Ok(())
+}
+
+/// Debug command to inspect blob cache state for a file
+#[tauri::command]
+pub async fn debug_blob_cache(
+    profile_name: String,
+    virtual_path: String,
+    state: State<'_, SettingsState>
+) -> Result<String, String> {
+    // Get settings to find paths
+    let settings_guard = state.lock().map_err(|e| format!("State lock error: {}", e))?;
+    let settings = settings_guard.as_ref()
+        .ok_or("Settings not loaded")?;
+    
+    let profiles_root = settings.data_root.join("profiles");
+    let manager = ProfileManager::new(profiles_root);
+    
+    let profile = manager.get_profile(&profile_name)
+        .map_err(|e| format!("Failed to get profile: {}", e))?
+        .ok_or(format!("Profile '{}' not found", profile_name))?;
+    
+    let cache_dir = settings.get_cache_directory();
+    let cache = crate::blob_cache::BlobCache::new(cache_dir);
+    let workspace_file_path = profile.workspace_dir.join(&virtual_path);
+    
+    let mut debug_info = Vec::new();
+    
+    // Check if file exists in workspace
+    debug_info.push(format!("File exists in workspace: {}", workspace_file_path.exists()));
+    
+    if workspace_file_path.exists() {
+        // Get file hash
+        match crate::blob_cache::BlobCache::hash_file(&workspace_file_path) {
+            Ok(file_hash) => {
+                debug_info.push(format!("File hash: {}", file_hash.to_hex()));
+                
+                // Check if blob exists in cache
+                let blob_path = cache.get_blob_path(&file_hash);
+                debug_info.push(format!("Blob exists in cache: {}", blob_path.exists()));
+                debug_info.push(format!("Expected blob path: {}", blob_path.display()));
+                
+                // Check if files are hardlinked (Windows)
+                if blob_path.exists() {
+                    #[cfg(windows)]
+                    {
+                        use crate::workspace_watcher::are_files_hardlinked;
+                        let is_hardlinked = are_files_hardlinked(&workspace_file_path, &blob_path);
+                        debug_info.push(format!("Files are hardlinked: {}", is_hardlinked));
+                    }
+                }
+                
+                // Check blob references
+                let blob_path_struct = crate::blob_cache::BlobPath {
+                    hash: file_hash,
+                    path: blob_path,
+                };
+                
+                match cache.get_refs(&blob_path_struct) {
+                    Ok(refs) => {
+                        debug_info.push(format!("Total references: {}", refs.len()));
+                        for (i, blob_ref) in refs.iter().enumerate() {
+                            debug_info.push(format!("  Ref {}: profile='{}', path='{}'", 
+                                          i+1, blob_ref.profile, blob_ref.rel_path));
+                        }
+                    }
+                    Err(e) => {
+                        debug_info.push(format!("Failed to get references: {}", e));
+                    }
+                }
+                
+                // Check if our specific reference exists
+                match crate::workspace_watcher::WorkspaceWatcher::find_blob_by_reference(
+                    &cache, &profile_name, &virtual_path
+                ) {
+                    Ok(found_hash) => {
+                        debug_info.push(format!("Found reference: hash={}", found_hash.to_hex()));
+                        debug_info.push(format!("Hash matches: {}", found_hash == file_hash));
+                    }
+                    Err(e) => {
+                        debug_info.push(format!("Reference lookup failed: {}", e));
+                    }
+                }
+            }
+            Err(e) => {
+                debug_info.push(format!("Failed to hash file: {}", e));
+            }
+        }
+    }
+    
+    // Check entire index for this profile
+    match cache.load_index() {
+        Ok(index) => {
+            let profile_refs: Vec<_> = index.refs.iter()
+                .flat_map(|(hash, refs)| {
+                    refs.iter().filter(|r| r.profile == profile_name)
+                        .map(|r| (hash.clone(), r.rel_path.clone()))
+                })
+                .collect();
+            
+            debug_info.push(format!("Total references for profile '{}': {}", profile_name, profile_refs.len()));
+            for (hash, path) in profile_refs {
+                debug_info.push(format!("  {} -> {}", path, &hash[..8]));
+            }
+        }
+        Err(e) => {
+            debug_info.push(format!("Failed to load index: {}", e));
+        }
+    }
+    
+    Ok(debug_info.join("\n"))
 }
 
 /// Copy a base file to workspace (make it editable)

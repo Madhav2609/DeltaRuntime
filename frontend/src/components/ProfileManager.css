@@ -348,6 +348,15 @@
   color: #4fb3d9;
 }
 
+.action-btn.delete {
+  color: #ff6b6b;
+}
+
+.action-btn.debug {
+  color: #9f9f9f;
+  font-size: 11px;
+}
+
 .file-children {
   margin-left: 12px;
   border-left: 1px solid #404040;

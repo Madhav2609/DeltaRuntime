@@ -41,7 +41,9 @@ pub fn run() {
             commands::open_profile_workspace,
             commands::get_virtual_file_tree,
             commands::revert_to_original,
-            commands::copy_to_workspace
+            commands::copy_to_workspace,
+            commands::delete_workspace_file,
+            commands::debug_blob_cache
         ])
     .setup(|_app| {
       // Setup complete - our logging is already initialized

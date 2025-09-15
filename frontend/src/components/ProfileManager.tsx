@@ -145,6 +145,16 @@ function ProfileManager({ onOpenWorkspace }: ProfileManagerProps) {
         setNotification(`Reverted ${node.name} to original`);
         setTimeout(() => setNotification(null), 3000);
         loadVirtualTree(selectedProfile);
+      } else if (action === 'delete' && node.source === 'Workspace') {
+        if (confirm(`Delete ${node.name}? This cannot be undone.`)) {
+          await invoke('delete_workspace_file', {
+            profileName: selectedProfile,
+            virtualPath: node.path
+          });
+          setNotification(`Deleted ${node.name} from workspace`);
+          setTimeout(() => setNotification(null), 3000);
+          loadVirtualTree(selectedProfile);
+        }
       } else if (action === 'copy_to_workspace' && node.source === 'Base') {
         await invoke('copy_to_workspace', {
           profileName: selectedProfile,
@@ -153,6 +163,19 @@ function ProfileManager({ onOpenWorkspace }: ProfileManagerProps) {
         setNotification(`Copied ${node.name} to workspace for editing`);
         setTimeout(() => setNotification(null), 3000);
         loadVirtualTree(selectedProfile);
+      } else if (action === 'debug' && (node.source === 'Workspace' || node.source === 'Override')) {
+        try {
+          const debugInfo = await invoke<string>('debug_blob_cache', {
+            profileName: selectedProfile,
+            virtualPath: node.path
+          });
+          console.log('Debug info for', node.path, ':\n', debugInfo);
+          setNotification(`Debug info logged to console for ${node.name}`);
+          setTimeout(() => setNotification(null), 3000);
+        } catch (err) {
+          console.error('Debug failed:', err);
+          setError(`Debug failed: ${err}`);
+        }
       }
     } catch (err) {
       console.error(`Failed to ${action}:`, err);
@@ -190,6 +213,30 @@ function ProfileManager({ onOpenWorkspace }: ProfileManagerProps) {
                   title="Revert to base file"
                 >
                   ↶ Revert
+                </button>
+              )}
+              {node.source === 'Workspace' && (
+                <button 
+                  className="action-btn delete"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleFileAction('delete', node);
+                  }}
+                  title="Delete workspace file"
+                >
+                  🗑 Delete
+                </button>
+              )}
+              {(node.source === 'Workspace' || node.source === 'Override') && (
+                <button 
+                  className="action-btn debug"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleFileAction('debug', node);
+                  }}
+                  title="Debug blob cache info"
+                >
+                  🔍 Debug
                 </button>
               )}
               {node.source === 'Base' && (

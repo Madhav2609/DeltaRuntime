@@ -12,7 +12,7 @@ use crate::settings::Settings;
 
 /// Check if two files are hardlinked using Windows API
 #[cfg(windows)]
-fn are_files_hardlinked(path1: &Path, path2: &Path) -> bool {
+pub fn are_files_hardlinked(path1: &Path, path2: &Path) -> bool {
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Storage::FileSystem::{
         CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
@@ -151,6 +151,9 @@ impl WorkspaceWatcher {
 
         self.watcher = Some(watcher);
         self.event_sender = Some(tx);
+
+        // Normalize any existing files in the workspace before starting to watch
+        Self::normalize_existing_files(&self.profile_name, &self.workspace_path, &self.cache)?;
 
         // Start the debounce thread
         let profile_name = self.profile_name.clone();
@@ -309,6 +312,104 @@ impl WorkspaceWatcher {
         }
 
         normalized_count
+    }
+
+    /// Normalize all existing files in workspace when watcher starts
+    /// This ensures that manually copied files are converted to hardlinks
+    pub fn normalize_existing_files(
+        profile_name: &str,
+        workspace_path: &Path,
+        cache: &BlobCache,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        info!("Starting normalization of existing files in workspace: {}", workspace_path.display());
+        
+        if !workspace_path.exists() {
+            debug!("Workspace path does not exist, skipping normalization: {}", workspace_path.display());
+            return Ok(());
+        }
+        
+        let mut normalized_count = 0;
+        let mut total_files = 0;
+        
+        Self::normalize_directory_recursive(
+            workspace_path, 
+            workspace_path, 
+            profile_name, 
+            cache, 
+            &mut normalized_count,
+            &mut total_files
+        )?;
+        
+        if total_files == 0 {
+            info!("No files found in workspace for profile '{}'", profile_name);
+        } else if normalized_count > 0 {
+            info!("Normalized {} out of {} existing files in workspace for profile '{}'", 
+                  normalized_count, total_files, profile_name);
+        } else {
+            info!("All {} files in workspace for profile '{}' were already normalized", 
+                  total_files, profile_name);
+        }
+        
+        Ok(())
+    }
+
+    /// Recursively normalize files in a directory
+    fn normalize_directory_recursive(
+        current_dir: &Path,
+        workspace_root: &Path,
+        profile_name: &str,
+        cache: &BlobCache,
+        normalized_count: &mut usize,
+        total_files: &mut usize,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let entries = fs::read_dir(current_dir)?;
+        
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            
+            if path.is_dir() {
+                // Skip hidden directories and common temp directories
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if name.starts_with('.') || name == "tmp" || name == "temp" {
+                        continue;
+                    }
+                }
+                
+                // Recursively process subdirectory
+                Self::normalize_directory_recursive(
+                    &path, 
+                    workspace_root, 
+                    profile_name, 
+                    cache, 
+                    normalized_count,
+                    total_files
+                )?;
+            } else if path.is_file() {
+                *total_files += 1;
+                
+                // Skip hidden files and temporary files
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if name.starts_with('.') || name.ends_with(".tmp") {
+                        debug!("Skipping hidden/temp file: {}", path.display());
+                        continue;
+                    }
+                }
+                
+                // Try to normalize this file
+                match Self::normalize_file(&path, profile_name, workspace_root, cache) {
+                    Ok(_) => {
+                        *normalized_count += 1;
+                        info!("Normalized existing file: {}", path.display());
+                    }
+                    Err(e) => {
+                        warn!("Failed to normalize existing file {}: {}", path.display(), e);
+                    }
+                }
+            }
+        }
+        
+        Ok(())
     }
 
     /// Normalize a file: hash → ensure_blob → replace with hardlink
