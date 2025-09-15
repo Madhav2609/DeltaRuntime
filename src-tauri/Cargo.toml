@@ -1,8 +1,8 @@
 [package]
-name = "gta-mod-launcher"
+name = "deltaruntime"
 version = "0.1.0"
-description = "GTA:SA Mod Launcher with hardlink-based virtualization"
-authors = ["GTA Mod Launcher Team"]
+description = "DeltaRuntime - Profile-based runtime manager for moddable games"
+authors = ["DeltaRuntime Team"]
 license = "MIT"
 repository = ""
 edition = "2021"
@@ -11,7 +11,7 @@ rust-version = "1.77.2"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [lib]
-name = "gta_mod_launcher_lib"
+name = "deltaruntime_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -23,7 +23,7 @@ serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
 tauri = { version = "2.8.5", features = [] }
 
-# Core dependencies for mod launcher
+# Core dependencies for runtime management
 blake3 = "1.5"
 rayon = "1.10"
 notify = "8.0"

@@ -22,7 +22,7 @@ pub fn init_logging() -> Result<()> {
         .with_context(|| format!("Failed to create logs directory: {}", logs_dir.display()))?;
 
     // Create file appender with daily rotation
-    let file_appender = rolling::daily(&logs_dir, "gta-mod-launcher.log");
+    let file_appender = rolling::daily(&logs_dir, "deltaruntime.log");
 
     // Create environment filter
     // Default to INFO level, but allow override via RUST_LOG environment variable
@@ -77,7 +77,7 @@ fn get_logs_dir() -> Result<PathBuf> {
     let config_dir = config_dir()
         .context("Failed to get config directory")?;
     
-    Ok(config_dir.join("GTA Mod Launcher").join("logs"))
+    Ok(config_dir.join("DeltaRuntime").join("logs"))
 }
 
 /// Get the current log level as a string
@@ -174,7 +174,7 @@ pub fn get_logs_info() -> Result<(PathBuf, u64, usize)> {
 
 /// Log a startup message with system information
 pub fn log_startup_info() {
-    info!("=== GTA:SA Mod Launcher Starting ===");
+    info!("=== DeltaRuntime Starting ===");
     info!("Version: {}", env!("CARGO_PKG_VERSION"));
     info!("Build target: {}", std::env::consts::ARCH);
     info!("Operating system: {}", std::env::consts::OS);
@@ -192,7 +192,7 @@ pub fn log_startup_info() {
 
 /// Log a shutdown message
 pub fn log_shutdown_info() {
-    info!("=== GTA:SA Mod Launcher Shutting Down ===");
+    info!("=== DeltaRuntime Shutting Down ===");
 }
 
 /// Custom macro for logging errors with context
@@ -237,7 +237,7 @@ mod tests {
     #[test]
     fn test_get_logs_dir() {
         let logs_dir = get_logs_dir().unwrap();
-        assert!(logs_dir.to_string_lossy().contains("GTA Mod Launcher"));
+        assert!(logs_dir.to_string_lossy().contains("DeltaRuntime"));
         assert!(logs_dir.to_string_lossy().contains("logs"));
     }
 

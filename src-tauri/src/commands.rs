@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::settings::{Settings, ValidationResult};
 use crate::path_utils::{get_drive_letter, is_ntfs_volume, get_free_space, format_size};
+use crate::profiles::{ProfileManager, Profile};
+use crate::virtual_fs::{VirtualFileSystem, VirtualNode};
 use tracing::info;
 
 /// Application state for settings
@@ -78,10 +80,10 @@ pub async fn needs_wizard(state: State<'_, SettingsState>) -> Result<bool, Strin
     }
 }
 
-/// Validate a GTA:SA base path
+/// Validate a game base path
 #[tauri::command]
 pub async fn validate_gta_base_path(path: String) -> Result<PathValidation, String> {
-    info!("Validating GTA base path: {}", path);
+    info!("Validating game base path: {}", path);
     
     let path_buf = PathBuf::from(&path);
     let exists = path_buf.exists();
@@ -94,7 +96,7 @@ pub async fn validate_gta_base_path(path: String) -> Result<PathValidation, Stri
     } else if !is_directory {
         Some("Path is not a directory".to_string())
     } else if !has_gta_exe {
-        Some("gta_sa.exe not found in this directory".to_string())
+        Some("Game executable not found in this directory".to_string())
     } else {
         None
     };
@@ -312,4 +314,293 @@ pub async fn pick_directory(title: String) -> Result<Option<String>, String> {
             Err("Failed to get path from dialog".to_string())
         }
     }
+}
+
+// =============================================================================
+// Profile Management Commands
+// =============================================================================
+
+/// Profile data structure for frontend
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct ProfileInfo {
+    pub name: String,
+    pub created_at: String,
+    pub last_used: String,
+    pub description: Option<String>,
+    pub workspace_path: String,
+    pub saves_path: String,
+}
+
+impl From<Profile> for ProfileInfo {
+    fn from(profile: Profile) -> Self {
+        Self {
+            name: profile.metadata.name,
+            created_at: profile.metadata.created_at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+            last_used: profile.metadata.last_used.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+            description: profile.metadata.description,
+            workspace_path: profile.workspace_dir.to_string_lossy().to_string(),
+            saves_path: profile.saves_dir.to_string_lossy().to_string(),
+        }
+    }
+}
+
+/// Create a new profile
+#[tauri::command]
+pub async fn create_profile(
+    name: String,
+    state: State<'_, SettingsState>
+) -> Result<ProfileInfo, String> {
+    info!("Creating profile: {}", name);
+    
+    // Get settings to find profiles directory
+    let settings_guard = state.lock().map_err(|e| format!("State lock error: {}", e))?;
+    let settings = settings_guard.as_ref()
+        .ok_or("Settings not loaded")?;
+    
+    let profiles_root = settings.data_root.join("profiles");
+    let manager = ProfileManager::new(profiles_root);
+    
+    let profile = manager.create_profile(name)
+        .map_err(|e| format!("Failed to create profile: {}", e))?;
+    
+    Ok(ProfileInfo::from(profile))
+}
+
+/// List all profiles
+#[tauri::command]
+pub async fn list_profiles(
+    state: State<'_, SettingsState>
+) -> Result<Vec<ProfileInfo>, String> {
+    info!("Listing profiles");
+    
+    // Get settings to find profiles directory
+    let settings_guard = state.lock().map_err(|e| format!("State lock error: {}", e))?;
+    let settings = settings_guard.as_ref()
+        .ok_or("Settings not loaded")?;
+    
+    let profiles_root = settings.data_root.join("profiles");
+    let manager = ProfileManager::new(profiles_root);
+    
+    let profiles = manager.list_profiles()
+        .map_err(|e| format!("Failed to list profiles: {}", e))?;
+    
+    Ok(profiles.into_iter().map(ProfileInfo::from).collect())
+}
+
+/// Rename a profile
+#[tauri::command]
+pub async fn rename_profile(
+    old_name: String,
+    new_name: String,
+    state: State<'_, SettingsState>
+) -> Result<ProfileInfo, String> {
+    info!("Renaming profile: {} -> {}", old_name, new_name);
+    
+    // Get settings to find profiles directory
+    let settings_guard = state.lock().map_err(|e| format!("State lock error: {}", e))?;
+    let settings = settings_guard.as_ref()
+        .ok_or("Settings not loaded")?;
+    
+    let profiles_root = settings.data_root.join("profiles");
+    let manager = ProfileManager::new(profiles_root);
+    
+    let profile = manager.rename_profile(&old_name, new_name)
+        .map_err(|e| format!("Failed to rename profile: {}", e))?;
+    
+    Ok(ProfileInfo::from(profile))
+}
+
+/// Delete a profile
+#[tauri::command]
+pub async fn delete_profile(
+    name: String,
+    state: State<'_, SettingsState>
+) -> Result<(), String> {
+    info!("Deleting profile: {}", name);
+    
+    // Get settings to find profiles directory
+    let settings_guard = state.lock().map_err(|e| format!("State lock error: {}", e))?;
+    let settings = settings_guard.as_ref()
+        .ok_or("Settings not loaded")?;
+    
+    let profiles_root = settings.data_root.join("profiles");
+    let manager = ProfileManager::new(profiles_root);
+    
+    manager.delete_profile(&name)
+        .map_err(|e| format!("Failed to delete profile: {}", e))?;
+    
+    Ok(())
+}
+
+/// Open profile workspace in file explorer
+#[tauri::command]
+pub async fn open_profile_workspace(
+    name: String,
+    state: State<'_, SettingsState>
+) -> Result<(), String> {
+    info!("Opening workspace for profile: {}", name);
+    
+    // Get settings to find profiles directory
+    let settings_guard = state.lock().map_err(|e| format!("State lock error: {}", e))?;
+    let settings = settings_guard.as_ref()
+        .ok_or("Settings not loaded")?;
+    
+    let profiles_root = settings.data_root.join("profiles");
+    let manager = ProfileManager::new(profiles_root);
+    
+    let profile = manager.get_profile(&name)
+        .map_err(|e| format!("Failed to get profile: {}", e))?
+        .ok_or(format!("Profile '{}' not found", name))?;
+    
+    // Open the workspace directory in file explorer
+    let workspace_path = profile.workspace_dir.to_string_lossy().to_string();
+    
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(&workspace_path)
+            .spawn()
+            .map_err(|e| format!("Failed to open explorer: {}", e))?;
+    }
+    
+    #[cfg(not(target_os = "windows"))]
+    {
+        return Err("Opening file explorer is only supported on Windows".to_string());
+    }
+    
+    Ok(())
+}
+
+// =============================================================================
+// Virtual File System Commands
+// =============================================================================
+
+/// Get virtual file tree for a profile
+#[tauri::command]
+pub async fn get_virtual_file_tree(
+    profile_name: String,
+    virtual_path: Option<String>,
+    state: State<'_, SettingsState>
+) -> Result<VirtualNode, String> {
+    info!("Getting virtual file tree for profile: {} at path: {:?}", profile_name, virtual_path);
+    
+    // Get settings to find paths
+    let settings_guard = state.lock().map_err(|e| format!("State lock error: {}", e))?;
+    let settings = settings_guard.as_ref()
+        .ok_or("Settings not loaded")?;
+    
+    let profiles_root = settings.data_root.join("profiles");
+    let manager = ProfileManager::new(profiles_root);
+    
+    let profile = manager.get_profile(&profile_name)
+        .map_err(|e| format!("Failed to get profile: {}", e))?
+        .ok_or(format!("Profile '{}' not found", profile_name))?;
+    
+    // Create virtual file system
+    let mut vfs = VirtualFileSystem::new(settings.base_path.clone(), profile.workspace_dir);
+    vfs.initialize()
+        .map_err(|e| format!("Failed to initialize virtual file system: {}", e))?;
+    
+    // Get virtual tree
+    let tree = vfs.get_virtual_tree(virtual_path.as_deref())
+        .map_err(|e| format!("Failed to get virtual tree: {}", e))?;
+    
+    Ok(tree)
+}
+
+/// Delete a file/directory in the virtual file system
+#[tauri::command]
+pub async fn delete_virtual_file(
+    profile_name: String,
+    virtual_path: String,
+    state: State<'_, SettingsState>
+) -> Result<(), String> {
+    info!("Deleting virtual file: {} in profile: {}", virtual_path, profile_name);
+    
+    // Get settings to find paths
+    let settings_guard = state.lock().map_err(|e| format!("State lock error: {}", e))?;
+    let settings = settings_guard.as_ref()
+        .ok_or("Settings not loaded")?;
+    
+    let profiles_root = settings.data_root.join("profiles");
+    let manager = ProfileManager::new(profiles_root);
+    
+    let profile = manager.get_profile(&profile_name)
+        .map_err(|e| format!("Failed to get profile: {}", e))?
+        .ok_or(format!("Profile '{}' not found", profile_name))?;
+    
+    // Create virtual file system
+    let mut vfs = VirtualFileSystem::new(settings.base_path.clone(), profile.workspace_dir);
+    vfs.initialize()
+        .map_err(|e| format!("Failed to initialize virtual file system: {}", e))?;
+    
+    // Delete the virtual path
+    vfs.delete_virtual_path(&virtual_path)
+        .map_err(|e| format!("Failed to delete virtual file: {}", e))?;
+    
+    Ok(())
+}
+
+/// Copy a base file to workspace (make it editable)
+#[tauri::command]
+pub async fn copy_to_workspace(
+    profile_name: String,
+    virtual_path: String,
+    state: State<'_, SettingsState>
+) -> Result<(), String> {
+    info!("Copying to workspace: {} in profile: {}", virtual_path, profile_name);
+    
+    // Get settings to find paths
+    let settings_guard = state.lock().map_err(|e| format!("State lock error: {}", e))?;
+    let settings = settings_guard.as_ref()
+        .ok_or("Settings not loaded")?;
+    
+    let profiles_root = settings.data_root.join("profiles");
+    let manager = ProfileManager::new(profiles_root);
+    
+    let profile = manager.get_profile(&profile_name)
+        .map_err(|e| format!("Failed to get profile: {}", e))?
+        .ok_or(format!("Profile '{}' not found", profile_name))?;
+    
+    // Create virtual file system
+    let vfs = VirtualFileSystem::new(settings.base_path.clone(), profile.workspace_dir);
+    
+    // Copy to workspace
+    vfs.copy_to_workspace(&virtual_path)
+        .map_err(|e| format!("Failed to copy to workspace: {}", e))?;
+    
+    Ok(())
+}
+
+/// Remove a tombstone (restore a deleted base file)
+#[tauri::command]
+pub async fn restore_deleted_file(
+    profile_name: String,
+    virtual_path: String,
+    state: State<'_, SettingsState>
+) -> Result<(), String> {
+    info!("Restoring deleted file: {} in profile: {}", virtual_path, profile_name);
+    
+    // Get settings to find paths
+    let settings_guard = state.lock().map_err(|e| format!("State lock error: {}", e))?;
+    let settings = settings_guard.as_ref()
+        .ok_or("Settings not loaded")?;
+    
+    let profiles_root = settings.data_root.join("profiles");
+    let manager = ProfileManager::new(profiles_root);
+    
+    let profile = manager.get_profile(&profile_name)
+        .map_err(|e| format!("Failed to get profile: {}", e))?
+        .ok_or(format!("Profile '{}' not found", profile_name))?;
+    
+    // Create virtual file system
+    let mut vfs = VirtualFileSystem::new(settings.base_path.clone(), profile.workspace_dir);
+    vfs.initialize()
+        .map_err(|e| format!("Failed to initialize virtual file system: {}", e))?;
+    
+    // Remove tombstone
+    vfs.remove_tombstone(&virtual_path)
+        .map_err(|e| format!("Failed to restore file: {}", e))?;
+    
+    Ok(())
 }

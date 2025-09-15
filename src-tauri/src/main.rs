@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-  gta_mod_launcher_lib::run();
+  deltaruntime_lib::run();
 }

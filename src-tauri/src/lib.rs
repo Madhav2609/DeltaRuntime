@@ -4,6 +4,9 @@ pub mod path_utils;
 pub mod logging;
 pub mod settings;
 pub mod commands;
+pub mod profiles;
+pub mod virtual_fs;
+pub mod blob_cache;
 
 use commands::SettingsState;
 
@@ -29,7 +32,16 @@ pub fn run() {
       commands::get_settings,
       commands::open_data_root,
       commands::open_gta_base,
-      commands::pick_directory
+      commands::pick_directory,
+      commands::create_profile,
+      commands::list_profiles,
+      commands::rename_profile,
+      commands::delete_profile,
+      commands::open_profile_workspace,
+      commands::get_virtual_file_tree,
+      commands::delete_virtual_file,
+      commands::copy_to_workspace,
+      commands::restore_deleted_file
     ])
     .setup(|_app| {
       // Setup complete - our logging is already initialized

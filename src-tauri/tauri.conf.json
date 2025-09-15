@@ -1,15 +1,15 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "gta-mod-launcher",
+  "productName": "DeltaRuntime",
   "version": "0.1.0",
-  "identifier": "com.gta-mod-launcher.app",
+  "identifier": "com.deltaruntime.app",
   "build": {
     "frontendDist": "../frontend/dist"
   },
   "app": {
     "windows": [
       {
-        "title": "GTA:SA Mod Launcher",
+        "title": "DeltaRuntime",
         "width": 800,
         "height": 600,
         "resizable": true,

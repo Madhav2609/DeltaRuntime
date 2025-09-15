@@ -11,10 +11,10 @@ pub struct Settings {
     /// Schema version for migration support
     pub schema: u32,
     
-    /// Path to the clean GTA:SA base installation
+    /// Path to the clean game base installation
     pub base_path: PathBuf,
     
-    /// Root directory for all mod launcher data
+    /// Root directory for all runtime data
     pub data_root: PathBuf,
     
     /// Overlay mode (currently only "hardlink" supported)
@@ -158,10 +158,10 @@ impl Settings {
     pub fn try_load_existing() -> Option<Self> {
         // Try common locations for existing settings
         let possible_locations = vec![
-            std::env::current_dir().ok()?.join("ModLauncher").join(Self::SETTINGS_FILE),
-            PathBuf::from("C:\\ModLauncher").join(Self::SETTINGS_FILE),
-            PathBuf::from("D:\\ModLauncher").join(Self::SETTINGS_FILE),
-            PathBuf::from("E:\\ModLauncher").join(Self::SETTINGS_FILE),
+            std::env::current_dir().ok()?.join("DeltaRuntime").join(Self::SETTINGS_FILE),
+            PathBuf::from("C:\\DeltaRuntime").join(Self::SETTINGS_FILE),
+            PathBuf::from("D:\\DeltaRuntime").join(Self::SETTINGS_FILE),
+            PathBuf::from("E:\\DeltaRuntime").join(Self::SETTINGS_FILE),
         ];
 
         for location in possible_locations {
@@ -205,14 +205,14 @@ impl Settings {
 
         // Validate base path
         if !self.base_path.exists() {
-            result.add_error(format!("Base GTA:SA path does not exist: {}", self.base_path.display()));
+            result.add_error(format!("Base game path does not exist: {}", self.base_path.display()));
         } else if !self.base_path.is_dir() {
             result.add_error(format!("Base path is not a directory: {}", self.base_path.display()));
         } else {
-            // Check for GTA:SA executable
+            // Check for game executable (GTA:SA as example)
             let gta_exe = self.base_path.join("gta_sa.exe");
             if !gta_exe.exists() {
-                result.add_warning(format!("GTA:SA executable not found at: {}", gta_exe.display()));
+                result.add_warning(format!("Game executable not found at: {}", gta_exe.display()));
             }
         }
 
@@ -368,7 +368,7 @@ mod tests {
         
         let mut settings = Settings::new();
         settings.base_path = PathBuf::from("C:\\Games\\GTA San Andreas");
-        settings.data_root = PathBuf::from("C:\\ModLauncher");
+        settings.data_root = PathBuf::from("C:\\DeltaRuntime");
         
         // Save and load
         settings.save(&settings_path).unwrap();

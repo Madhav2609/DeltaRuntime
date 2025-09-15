@@ -49,9 +49,9 @@ const Wizard: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
 
   const steps = [
-    { number: 1, title: 'Select GTA:SA Base', description: 'Choose your clean GTA:SA installation' },
+    { number: 1, title: 'Select Game Base', description: 'Choose your clean game installation' },
     { number: 2, title: 'Validate Drive', description: 'Check NTFS and free space' },
-    { number: 3, title: 'Create Structure', description: 'Set up mod launcher directories' },
+    { number: 3, title: 'Create Structure', description: 'Set up runtime directories' },
   ];
 
   // Generate data root path based on base path
@@ -62,7 +62,7 @@ const Wizard: React.FC = () => {
         const match = basePath.match(/^([A-Za-z]):/);
         if (match) {
           const drive = match[1].toUpperCase();
-          setDataRoot(`${drive}:\\ModLauncher`);
+          setDataRoot(`${drive}:\\DeltaRuntime`);
         }
       } catch (err) {
         console.error('Error generating data root:', err);
@@ -139,8 +139,8 @@ const Wizard: React.FC = () => {
   return (
     <div className="wizard">
       <div className="wizard-header">
-        <h1>GTA:SA Mod Launcher Setup</h1>
-        <p>Welcome! Let's set up your mod launcher in just a few steps.</p>
+        <h1>DeltaRuntime Setup</h1>
+        <p>Welcome! Let's set up your runtime environment in just a few steps.</p>
       </div>
 
       <div className="wizard-progress">
