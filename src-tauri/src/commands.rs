@@ -1,13 +1,16 @@
 use tauri::State;
 use std::sync::Mutex;
 use std::path::PathBuf;
+use std::collections::HashMap;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use log::debug;
 
 use crate::settings::{Settings, ValidationResult};
-use crate::path_utils::{get_drive_letter, is_ntfs_volume, get_free_space, format_size};
+use crate::path_utils::{get_drive_letter, is_ntfs_volume, get_free_space, format_size, same_volume};
 use crate::profiles::{ProfileManager, Profile};
 use crate::virtual_fs::{VirtualFileSystem, VirtualNode};
+use crate::workspace_watcher::WorkspaceWatcher;
 use tracing::info;
 
 /// Application state for settings
@@ -358,6 +361,20 @@ pub async fn create_profile(
         .ok_or("Settings not loaded")?;
     
     let profiles_root = settings.data_root.join("profiles");
+    let cache_root = settings.data_root.join("cache");
+    
+    // CRITICAL: Validate that profiles and cache are on the same volume for hardlinks
+    let same_vol = same_volume(&profiles_root, &cache_root)
+        .map_err(|e| format!("Volume validation failed: {}", e))?;
+    
+    if !same_vol {
+        return Err(format!(
+            "CRITICAL: Profiles directory and cache must be on the same NTFS volume for zero-overhead hardlinks. \
+             Profiles: {}, Cache: {}. Please ensure data_root contains both.",
+            profiles_root.display(), cache_root.display()
+        ));
+    }
+    
     let manager = ProfileManager::new(profiles_root);
     
     let profile = manager.create_profile(name)
@@ -480,9 +497,13 @@ pub async fn open_profile_workspace(
 pub async fn get_virtual_file_tree(
     profile_name: String,
     virtual_path: Option<String>,
-    state: State<'_, SettingsState>
+    state: State<'_, SettingsState>,
+    app_handle: tauri::AppHandle,
 ) -> Result<VirtualNode, String> {
     info!("Getting virtual file tree for profile: {} at path: {:?}", profile_name, virtual_path);
+    
+    // Auto-start workspace watcher for this profile
+    let _ = ensure_workspace_watcher_running(&profile_name, &state, app_handle).await;
     
     // Get settings to find paths
     let settings_guard = state.lock().map_err(|e| format!("State lock error: {}", e))?;
@@ -508,14 +529,15 @@ pub async fn get_virtual_file_tree(
     Ok(tree)
 }
 
-/// Delete a file/directory in the virtual file system
+/// Revert a workspace file to original (remove workspace override)
+/// This only works on files that exist in the workspace AND have a base file
 #[tauri::command]
-pub async fn delete_virtual_file(
+pub async fn revert_to_original(
     profile_name: String,
     virtual_path: String,
     state: State<'_, SettingsState>
 ) -> Result<(), String> {
-    info!("Deleting virtual file: {} in profile: {}", virtual_path, profile_name);
+    info!("Reverting to original: {} in profile: {}", virtual_path, profile_name);
     
     // Get settings to find paths
     let settings_guard = state.lock().map_err(|e| format!("State lock error: {}", e))?;
@@ -529,15 +551,31 @@ pub async fn delete_virtual_file(
         .map_err(|e| format!("Failed to get profile: {}", e))?
         .ok_or(format!("Profile '{}' not found", profile_name))?;
     
-    // Create virtual file system
-    let mut vfs = VirtualFileSystem::new(settings.base_path.clone(), profile.workspace_dir);
-    vfs.initialize()
-        .map_err(|e| format!("Failed to initialize virtual file system: {}", e))?;
+    // Create virtual file system and use its revert method
+    let vfs = VirtualFileSystem::new(settings.base_path.clone(), profile.workspace_dir);
+    vfs.revert_to_original(&virtual_path)
+        .map_err(|e| format!("Failed to revert to original: {}", e))?;
     
-    // Delete the virtual path
-    vfs.delete_virtual_path(&virtual_path)
-        .map_err(|e| format!("Failed to delete virtual file: {}", e))?;
+    // Remove blob reference if it was normalized
+    let cache_dir = settings.get_cache_directory();
+    let cache = crate::blob_cache::BlobCache::new(cache_dir);
     
+    // Find and remove any blob reference for this workspace file
+    if let Ok(blob_hash) = crate::workspace_watcher::WorkspaceWatcher::find_blob_by_reference(
+        &cache, 
+        &profile_name, 
+        &virtual_path
+    ) {
+        let blob_path = crate::blob_cache::BlobPath {
+            hash: blob_hash,
+            path: cache.get_blob_path(&blob_hash),
+        };
+        
+        let _ = cache.remove_ref(&blob_path, &profile_name, &virtual_path);
+        info!("Removed blob reference for reverted file: {}", virtual_path);
+    }
+    
+    info!("Reverted to original: {} in profile: {}", virtual_path, profile_name);
     Ok(())
 }
 
@@ -572,16 +610,36 @@ pub async fn copy_to_workspace(
     Ok(())
 }
 
-/// Remove a tombstone (restore a deleted base file)
-#[tauri::command]
-pub async fn restore_deleted_file(
-    profile_name: String,
-    virtual_path: String,
-    state: State<'_, SettingsState>
+// =============================================================================
+// Workspace Watcher (Auto-running)
+// =============================================================================
+
+use std::sync::Arc;
+use once_cell::sync::Lazy;
+
+type WatcherRegistry = Arc<Mutex<HashMap<String, crate::workspace_watcher::WorkspaceWatcher>>>;
+
+static ACTIVE_WATCHERS: Lazy<WatcherRegistry> = Lazy::new(|| {
+    Arc::new(Mutex::new(HashMap::new()))
+});
+
+/// Automatically ensure workspace watcher is running for a profile
+/// Called internally whenever a profile is accessed
+async fn ensure_workspace_watcher_running(
+    profile_name: &str,
+    state: &State<'_, SettingsState>,
+    app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
-    info!("Restoring deleted file: {} in profile: {}", virtual_path, profile_name);
+    let mut watchers = ACTIVE_WATCHERS.lock()
+        .map_err(|e| format!("Failed to acquire watcher lock: {}", e))?;
     
-    // Get settings to find paths
+    // Check if watcher is already running for this profile
+    if watchers.contains_key(profile_name) {
+        debug!("Workspace watcher already running for profile: {}", profile_name);
+        return Ok(());
+    }
+    
+    // Get settings and profile info
     let settings_guard = state.lock().map_err(|e| format!("State lock error: {}", e))?;
     let settings = settings_guard.as_ref()
         .ok_or("Settings not loaded")?;
@@ -589,18 +647,37 @@ pub async fn restore_deleted_file(
     let profiles_root = settings.data_root.join("profiles");
     let manager = ProfileManager::new(profiles_root);
     
-    let profile = manager.get_profile(&profile_name)
+    let profile = manager.get_profile(profile_name)
         .map_err(|e| format!("Failed to get profile: {}", e))?
         .ok_or(format!("Profile '{}' not found", profile_name))?;
     
-    // Create virtual file system
-    let mut vfs = VirtualFileSystem::new(settings.base_path.clone(), profile.workspace_dir);
-    vfs.initialize()
-        .map_err(|e| format!("Failed to initialize virtual file system: {}", e))?;
+    // Create and start workspace watcher
+    let mut watcher = WorkspaceWatcher::new(
+        profile_name.to_string(),
+        profile.workspace_dir,
+    ).map_err(|e| format!("Failed to create workspace watcher: {}", e))?;
     
-    // Remove tombstone
-    vfs.remove_tombstone(&virtual_path)
-        .map_err(|e| format!("Failed to restore file: {}", e))?;
+    watcher.set_app_handle(app_handle);
+    watcher.start_watching()
+        .map_err(|e| format!("Failed to start workspace watcher: {}", e))?;
+    
+    info!("Auto-started workspace watcher for profile: {}", profile_name);
+    
+    // Store the watcher
+    watchers.insert(profile_name.to_string(), watcher);
+    
+    Ok(())
+}
+
+/// Stop workspace watcher for a profile (called when switching profiles)
+async fn stop_workspace_watcher_internal(profile_name: &str) -> Result<(), String> {
+    let mut watchers = ACTIVE_WATCHERS.lock()
+        .map_err(|e| format!("Failed to acquire watcher lock: {}", e))?;
+    
+    if let Some(mut watcher) = watchers.remove(profile_name) {
+        watcher.stop_watching();
+        info!("Stopped workspace watcher for profile: {}", profile_name);
+    }
     
     Ok(())
 }

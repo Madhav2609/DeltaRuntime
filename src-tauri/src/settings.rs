@@ -306,6 +306,11 @@ impl Settings {
         self.base_path.as_os_str().is_empty() || 
         self.data_root.as_os_str().is_empty()
     }
+
+    /// Get the cache directory path
+    pub fn get_cache_directory(&self) -> PathBuf {
+        self.data_root.join("cache")
+    }
 }
 
 /// Result of settings validation

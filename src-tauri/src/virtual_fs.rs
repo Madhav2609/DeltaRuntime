@@ -1,9 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::fs;
-use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use anyhow::{Context, Result};
-use tracing::{debug, info};
+use tracing::info;
 
 /// Represents a file or directory in the virtual file system
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,23 +30,10 @@ pub struct VirtualNode {
 pub enum VirtualNodeSource {
     /// File/directory from the base game installation
     Base,
-    /// File/directory from the workspace overlay
+    /// File/directory from the workspace overlay  
     Workspace,
     /// File/directory that exists in both (workspace overrides base)
-    WorkspaceOverride,
-    /// Tombstone - base file is hidden/deleted
-    Tombstone,
-}
-
-/// Represents a tombstone file that marks a base file as deleted
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Tombstone {
-    /// Path of the deleted file/directory relative to game root
-    pub path: String,
-    /// When the deletion was created
-    pub created: chrono::DateTime<chrono::Utc>,
-    /// Whether this tombstone deletes a directory (recursive)
-    pub is_directory: bool,
+    Override,
 }
 
 /// Virtual file system that overlays workspace on top of base game installation
@@ -56,83 +42,21 @@ pub struct VirtualFileSystem {
     base_path: PathBuf,
     /// Path to the workspace overlay
     workspace_path: PathBuf,
-    /// Path to tombstones file
-    tombstones_path: PathBuf,
-    /// Cached tombstones
-    tombstones: HashMap<String, Tombstone>,
 }
 
 impl VirtualFileSystem {
     /// Create a new virtual file system
     pub fn new(base_path: PathBuf, workspace_path: PathBuf) -> Self {
-        let tombstones_path = workspace_path.join(".deltaruntime_tombstones.json");
         Self {
             base_path,
             workspace_path,
-            tombstones_path,
-            tombstones: HashMap::new(),
         }
     }
 
-    /// Initialize the virtual file system (load tombstones)
+    /// Initialize the virtual file system
     pub fn initialize(&mut self) -> Result<()> {
-        self.load_tombstones()?;
+        // No initialization needed without tombstones
         Ok(())
-    }
-
-    /// Load tombstones from disk
-    fn load_tombstones(&mut self) -> Result<()> {
-        if !self.tombstones_path.exists() {
-            debug!("No tombstones file found, starting with empty tombstones");
-            return Ok(());
-        }
-
-        let content = fs::read_to_string(&self.tombstones_path)
-            .with_context(|| format!("Failed to read tombstones file: {}", self.tombstones_path.display()))?;
-
-        let tombstones: Vec<Tombstone> = serde_json::from_str(&content)
-            .with_context(|| "Failed to parse tombstones file")?;
-
-        self.tombstones.clear();
-        for tombstone in tombstones {
-            self.tombstones.insert(tombstone.path.clone(), tombstone);
-        }
-
-        debug!("Loaded {} tombstones", self.tombstones.len());
-        Ok(())
-    }
-
-    /// Save tombstones to disk
-    fn save_tombstones(&self) -> Result<()> {
-        let tombstones: Vec<&Tombstone> = self.tombstones.values().collect();
-        let content = serde_json::to_string_pretty(&tombstones)
-            .context("Failed to serialize tombstones")?;
-
-        fs::write(&self.tombstones_path, content)
-            .with_context(|| format!("Failed to write tombstones file: {}", self.tombstones_path.display()))?;
-
-        debug!("Saved {} tombstones", self.tombstones.len());
-        Ok(())
-    }
-
-    /// Check if a path is tombstoned (deleted)
-    fn is_tombstoned(&self, virtual_path: &str) -> bool {
-        // Check if this exact path is tombstoned
-        if self.tombstones.contains_key(virtual_path) {
-            return true;
-        }
-
-        // Check if any parent directory is tombstoned
-        let path = Path::new(virtual_path);
-        for ancestor in path.ancestors() {
-            if let Some(ancestor_str) = ancestor.to_str() {
-                if ancestor_str != virtual_path && self.tombstones.contains_key(ancestor_str) {
-                    return true;
-                }
-            }
-        }
-
-        false
     }
 
     /// Get virtual file system tree starting from root or a specific path
@@ -141,26 +65,23 @@ impl VirtualFileSystem {
         self.build_virtual_node(root_path, true)
     }
 
-    /// Build a virtual node by merging base and workspace
+    /// Build a virtual node by merging base and workspace  
     fn build_virtual_node(&self, virtual_path: &str, include_children: bool) -> Result<VirtualNode> {
         let base_full_path = self.base_path.join(virtual_path);
         let workspace_full_path = self.workspace_path.join(virtual_path);
 
         let base_exists = base_full_path.exists();
         let workspace_exists = workspace_full_path.exists();
-        let is_tombstoned = self.is_tombstoned(virtual_path);
-
-        // If tombstoned and only base exists, this node is deleted
-        if is_tombstoned && !workspace_exists {
-            return Err(anyhow::anyhow!("Path is tombstoned: {}", virtual_path));
-        }
 
         // Determine the source and primary path to use
         let (source, primary_path, writable) = if workspace_exists && base_exists {
-            (VirtualNodeSource::WorkspaceOverride, &workspace_full_path, true)
+            // Workspace file overrides base file
+            (VirtualNodeSource::Override, &workspace_full_path, true)
         } else if workspace_exists {
+            // Workspace-only file (new file added to workspace)
             (VirtualNodeSource::Workspace, &workspace_full_path, true)
-        } else if base_exists && !is_tombstoned {
+        } else if base_exists {
+            // Base file only (read-only)
             (VirtualNodeSource::Base, &base_full_path, false)
         } else {
             return Err(anyhow::anyhow!("Path does not exist: {}", virtual_path));
@@ -223,6 +144,7 @@ impl VirtualFileSystem {
                 let name = entry.file_name().to_string_lossy().to_string();
                 
                 // Skip tombstones file
+                // Skip tombstones file (legacy)
                 if name == ".deltaruntime_tombstones.json" {
                     continue;
                 }
@@ -233,11 +155,9 @@ impl VirtualFileSystem {
                     format!("{}/{}", virtual_path, name)
                 };
 
-                if !self.is_tombstoned(&child_virtual_path) {
-                    if let Ok(child) = self.build_virtual_node(&child_virtual_path, false) {
-                        children.push(child);
-                        seen_names.insert(name);
-                    }
+                if let Ok(child) = self.build_virtual_node(&child_virtual_path, false) {
+                    children.push(child);
+                    seen_names.insert(name);
                 }
             }
         }
@@ -258,10 +178,8 @@ impl VirtualFileSystem {
                     format!("{}/{}", virtual_path, name)
                 };
 
-                if !self.is_tombstoned(&child_virtual_path) {
-                    if let Ok(child) = self.build_virtual_node(&child_virtual_path, false) {
-                        children.push(child);
-                    }
+                if let Ok(child) = self.build_virtual_node(&child_virtual_path, false) {
+                    children.push(child);
                 }
             }
         }
@@ -276,36 +194,6 @@ impl VirtualFileSystem {
         });
 
         Ok(children)
-    }
-
-    /// Create a tombstone (mark file/directory as deleted)
-    pub fn create_tombstone(&mut self, virtual_path: &str) -> Result<()> {
-        info!("Creating tombstone for: {}", virtual_path);
-
-        let base_path = self.base_path.join(virtual_path);
-        let is_directory = base_path.is_dir();
-
-        let tombstone = Tombstone {
-            path: virtual_path.to_string(),
-            created: chrono::Utc::now(),
-            is_directory,
-        };
-
-        self.tombstones.insert(virtual_path.to_string(), tombstone);
-        self.save_tombstones()?;
-
-        Ok(())
-    }
-
-    /// Remove a tombstone (restore deleted file/directory)
-    pub fn remove_tombstone(&mut self, virtual_path: &str) -> Result<()> {
-        info!("Removing tombstone for: {}", virtual_path);
-
-        if self.tombstones.remove(virtual_path).is_some() {
-            self.save_tombstones()?;
-        }
-
-        Ok(())
     }
 
     /// Copy a file from base to workspace (make it writable)
@@ -330,28 +218,30 @@ impl VirtualFileSystem {
         Ok(())
     }
 
-    /// Delete a file/directory from the virtual file system
-    pub fn delete_virtual_path(&mut self, virtual_path: &str) -> Result<()> {
+    /// Revert workspace file to reveal base file (only works for workspace overrides)
+    pub fn revert_to_original(&self, virtual_path: &str) -> Result<()> {
         let workspace_path = self.workspace_path.join(virtual_path);
         let base_path = self.base_path.join(virtual_path);
 
-        // If file exists in workspace, delete it
-        if workspace_path.exists() {
-            if workspace_path.is_dir() {
-                fs::remove_dir_all(&workspace_path)
-                    .with_context(|| format!("Failed to delete workspace directory: {}", virtual_path))?;
-            } else {
-                fs::remove_file(&workspace_path)
-                    .with_context(|| format!("Failed to delete workspace file: {}", virtual_path))?;
-            }
+        // Only allow reverting workspace files that override base files
+        if !workspace_path.exists() {
+            return Err(anyhow::anyhow!("No workspace file to revert: {}", virtual_path));
         }
 
-        // If file exists in base, create tombstone
-        if base_path.exists() {
-            self.create_tombstone(virtual_path)?;
+        if !base_path.exists() {
+            return Err(anyhow::anyhow!("Cannot revert workspace-only file (no base file exists): {}", virtual_path));
         }
 
-        info!("Deleted virtual path: {}", virtual_path);
+        // Remove the workspace file to reveal the base file underneath
+        if workspace_path.is_dir() {
+            fs::remove_dir_all(&workspace_path)
+                .with_context(|| format!("Failed to remove workspace directory: {}", virtual_path))?;
+        } else {
+            fs::remove_file(&workspace_path)
+                .with_context(|| format!("Failed to remove workspace file: {}", virtual_path))?;
+        }
+
+        info!("Reverted workspace file to original: {}", virtual_path);
         Ok(())
     }
 }

@@ -1,8 +1,6 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import ProfileSidebar from './ProfileSidebar';
-import VirtualFileTree from './VirtualFileTree';
-import type { VirtualNode } from './VirtualFileTree';
+import { listen } from '@tauri-apps/api/event';
 import './ProfileManager.css';
 
 export interface ProfileInfo {
@@ -14,6 +12,17 @@ export interface ProfileInfo {
   saves_path: string;
 }
 
+interface VirtualNode {
+  name: string;
+  path?: string;
+  is_directory: boolean;
+  children?: VirtualNode[];
+  size?: number;
+  modified?: string;
+  source: 'Base' | 'Workspace' | 'Override';
+  writable: boolean;
+}
+
 interface ProfileManagerProps {
   onOpenWorkspace?: (profileName: string) => void;
 }
@@ -22,22 +31,46 @@ function ProfileManager({ onOpenWorkspace }: ProfileManagerProps) {
   const [profiles, setProfiles] = useState<ProfileInfo[]>([]);
   const [selectedProfile, setSelectedProfile] = useState<string | null>(null);
   const [selectedFile, setSelectedFile] = useState<VirtualNode | null>(null);
+  const [virtualTree, setVirtualTree] = useState<VirtualNode | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [notification, setNotification] = useState<string | null>(null);
 
   useEffect(() => {
     loadProfiles();
+    setupEventListeners();
   }, []);
 
+  useEffect(() => {
+    if (selectedProfile) {
+      loadVirtualTree(selectedProfile);
+    }
+  }, [selectedProfile]);
+
+  const setupEventListeners = async () => {
+    // Listen for workspace normalization events
+    const unlisten = await listen<string>('workspace-normalized', (event) => {
+      setNotification(`File normalized: ${event.payload}`);
+      setTimeout(() => setNotification(null), 3000);
+      
+      // Reload virtual tree to show changes
+      if (selectedProfile) {
+        loadVirtualTree(selectedProfile);
+      }
+    });
+    
+    return () => {
+      unlisten();
+    };
+  };
+
   const loadProfiles = async () => {
-    setIsLoading(true);
-    setError(null);
     try {
+      setIsLoading(true);
       const profileList = await invoke<ProfileInfo[]>('list_profiles');
       setProfiles(profileList);
       
-      // Select the first profile if none selected and profiles exist
-      if (!selectedProfile && profileList.length > 0) {
+      if (profileList.length > 0 && !selectedProfile) {
         setSelectedProfile(profileList[0].name);
       }
     } catch (err) {
@@ -48,52 +81,45 @@ function ProfileManager({ onOpenWorkspace }: ProfileManagerProps) {
     }
   };
 
-  const handleCreateProfile = async (name: string) => {
+  const loadVirtualTree = async (profileName: string) => {
     try {
-      const newProfile = await invoke<ProfileInfo>('create_profile', { name });
-      setProfiles(prev => [newProfile, ...prev]);
-      setSelectedProfile(newProfile.name);
-      return newProfile;
+      const tree = await invoke<VirtualNode>('get_virtual_file_tree', { 
+        profileName 
+      });
+      setVirtualTree(tree);
     } catch (err) {
-      console.error('Failed to create profile:', err);
-      throw err;
+      console.error('Failed to load virtual tree:', err);
+      setError(err as string);
     }
   };
 
-  const handleRenameProfile = async (oldName: string, newName: string) => {
+  const handleCreateProfile = async (name: string) => {
     try {
-      const updatedProfile = await invoke<ProfileInfo>('rename_profile', { 
-        oldName, 
-        newName 
-      });
-      
-      setProfiles(prev => 
-        prev.map(p => p.name === oldName ? updatedProfile : p)
-      );
-      
-      if (selectedProfile === oldName) {
-        setSelectedProfile(newName);
-      }
-      
-      return updatedProfile;
+      const newProfile = await invoke<ProfileInfo>('create_profile', { name });
+      setProfiles(prev => [...prev, newProfile]);
+      setSelectedProfile(name);
     } catch (err) {
-      console.error('Failed to rename profile:', err);
-      throw err;
+      console.error('Failed to create profile:', err);
+      setError(err as string);
     }
   };
 
   const handleDeleteProfile = async (name: string) => {
+    if (!confirm(`Delete profile "${name}"? This cannot be undone.`)) {
+      return;
+    }
+    
     try {
       await invoke('delete_profile', { name });
       setProfiles(prev => prev.filter(p => p.name !== name));
       
       if (selectedProfile === name) {
-        const remainingProfiles = profiles.filter(p => p.name !== name);
-        setSelectedProfile(remainingProfiles.length > 0 ? remainingProfiles[0].name : null);
+        const remaining = profiles.filter(p => p.name !== name);
+        setSelectedProfile(remaining.length > 0 ? remaining[0].name : null);
       }
     } catch (err) {
       console.error('Failed to delete profile:', err);
-      throw err;
+      setError(err as string);
     }
   };
 
@@ -103,8 +129,91 @@ function ProfileManager({ onOpenWorkspace }: ProfileManagerProps) {
       onOpenWorkspace?.(profileName);
     } catch (err) {
       console.error('Failed to open workspace:', err);
-      throw err;
+      setError(err as string);
     }
+  };
+
+  const handleFileAction = async (action: string, node: VirtualNode) => {
+    if (!selectedProfile || !node.path) return;
+    
+    try {
+      if (action === 'revert' && node.source === 'Override') {
+        await invoke('revert_to_original', {
+          profileName: selectedProfile,
+          virtualPath: node.path
+        });
+        setNotification(`Reverted ${node.name} to original`);
+        setTimeout(() => setNotification(null), 3000);
+        loadVirtualTree(selectedProfile);
+      } else if (action === 'copy_to_workspace' && node.source === 'Base') {
+        await invoke('copy_to_workspace', {
+          profileName: selectedProfile,
+          virtualPath: node.path
+        });
+        setNotification(`Copied ${node.name} to workspace for editing`);
+        setTimeout(() => setNotification(null), 3000);
+        loadVirtualTree(selectedProfile);
+      }
+    } catch (err) {
+      console.error(`Failed to ${action}:`, err);
+      setError(err as string);
+    }
+  };
+
+  const renderFileTree = (node: VirtualNode, depth = 0): React.JSX.Element => {
+    const indent = depth * 16;
+    const isSelected = selectedFile?.path === node.path;
+    
+    return (
+      <div key={node.path || node.name}>
+        <div 
+          className={`file-item ${isSelected ? 'selected' : ''} ${node.source.toLowerCase()}`}
+          style={{ paddingLeft: `${indent}px` }}
+          onClick={() => setSelectedFile(node)}
+        >
+          <span className="file-icon">
+            {node.is_directory ? '📁' : '📄'}
+          </span>
+          <span className="file-name">{node.name}</span>
+          <span className={`file-source ${node.source.toLowerCase()}`}>
+            {node.source}
+          </span>
+          {!node.is_directory && (
+            <div className="file-actions">
+              {node.source === 'Override' && (
+                <button 
+                  className="action-btn revert"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleFileAction('revert', node);
+                  }}
+                  title="Revert to base file"
+                >
+                  ↶ Revert
+                </button>
+              )}
+              {node.source === 'Base' && (
+                <button 
+                  className="action-btn copy"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleFileAction('copy_to_workspace', node);
+                  }}
+                  title="Copy to workspace for editing"
+                >
+                  ✏️ Edit
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+        {node.is_directory && node.children && (
+          <div className="file-children">
+            {node.children.map(child => renderFileTree(child, depth + 1))}
+          </div>
+        )}
+      </div>
+    );
   };
 
   const selectedProfileData = profiles.find(p => p.name === selectedProfile);
@@ -112,7 +221,7 @@ function ProfileManager({ onOpenWorkspace }: ProfileManagerProps) {
   if (isLoading) {
     return (
       <div className="profile-manager loading">
-        <div className="loading-spinner"></div>
+        <div className="loading-spinner">⚡</div>
         <p>Loading profiles...</p>
       </div>
     );
@@ -120,117 +229,133 @@ function ProfileManager({ onOpenWorkspace }: ProfileManagerProps) {
 
   return (
     <div className="profile-manager">
-      <ProfileSidebar
-        profiles={profiles}
-        selectedProfile={selectedProfile}
-        onSelectProfile={setSelectedProfile}
-        onCreateProfile={handleCreateProfile}
-        onRenameProfile={handleRenameProfile}
-        onDeleteProfile={handleDeleteProfile}
-        onOpenWorkspace={handleOpenWorkspace}
-        error={error}
-      />
+      {/* Notification */}
+      {notification && (
+        <div className="notification">
+          <span className="notification-icon">⚡</span>
+          <span>{notification}</span>
+          <button onClick={() => setNotification(null)}>×</button>
+        </div>
+      )}
+
+      {/* Error Display */}
+      {error && (
+        <div className="error-banner">
+          <span className="error-icon">⚠️</span>
+          <span>{error}</span>
+          <button onClick={() => setError(null)}>×</button>
+        </div>
+      )}
       
-      <div className="profile-content">
+      {/* Sidebar */}
+      <div className="sidebar">
+        <div className="sidebar-header">
+          <h2>Profiles</h2>
+          <button 
+            className="create-btn"
+            onClick={() => {
+              const name = prompt('Profile name:');
+              if (name) handleCreateProfile(name);
+            }}
+          >
+            +
+          </button>
+        </div>
+        
+        <div className="profile-list">
+          {profiles.map(profile => (
+            <div 
+              key={profile.name}
+              className={`profile-item ${selectedProfile === profile.name ? 'selected' : ''}`}
+              onClick={() => setSelectedProfile(profile.name)}
+            >
+              <div className="profile-name">{profile.name}</div>
+              <div className="profile-meta">
+                Last used: {new Date(profile.last_used).toLocaleDateString()}
+              </div>
+              <button 
+                className="delete-btn"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleDeleteProfile(profile.name);
+                }}
+              >
+                🗑️
+              </button>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Main Content */}
+      <div className="main-content">
         {selectedProfileData ? (
-          <div className="profile-details">
+          <>
             <header className="profile-header">
-              <h1>Profile: {selectedProfileData.name}</h1>
-              <div className="profile-actions">
+              <h1>{selectedProfileData.name}</h1>
+              <div className="header-actions">
                 <button 
-                  className="action-button primary"
+                  className="primary-btn"
                   onClick={() => handleOpenWorkspace(selectedProfileData.name)}
                 >
-                  Open Workspace
+                  📁 Open Workspace
                 </button>
-                <button className="action-button">Launch Game</button>
+                <button className="primary-btn">🎮 Launch Game</button>
               </div>
             </header>
             
-            <div className="profile-info">
-              <div className="info-section">
-                <h3>Profile Information</h3>
-                <div className="info-grid">
-                  <div className="info-item">
-                    <label>Created:</label>
-                    <span>{selectedProfileData.created_at}</span>
-                  </div>
-                  <div className="info-item">
-                    <label>Last Used:</label>
-                    <span>{selectedProfileData.last_used}</span>
-                  </div>
-                  <div className="info-item">
-                    <label>Workspace:</label>
-                    <code>{selectedProfileData.workspace_path}</code>
-                  </div>
-                  <div className="info-item">
-                    <label>Saves:</label>
-                    <code>{selectedProfileData.saves_path}</code>
-                  </div>
-                </div>
-              </div>
-              
-              <div className="info-section">
+            <div className="content-sections">
+              <section className="virtual-files-section">
                 <h3>Virtual Game Folder</h3>
                 <p className="section-description">
-                  This shows your game files with workspace modifications overlaid. 
-                  Base files are read-only, workspace files are editable.
+                  Combined view of base game files and workspace modifications. 
+                  Base files are read-only, workspace files can be reverted.
                 </p>
-                <div className="virtual-tree-container">
-                  <VirtualFileTree 
-                    profileName={selectedProfileData.name}
-                    onFileSelect={setSelectedFile}
-                    onFileAction={(action, node) => {
-                      console.log(`File ${action}:`, node);
-                      // Could show notifications or update UI based on action
-                    }}
-                  />
+                
+                <div className="file-tree">
+                  {virtualTree ? renderFileTree(virtualTree) : (
+                    <div className="loading-tree">Loading file tree...</div>
+                  )}
                 </div>
-              </div>
+              </section>
               
               {selectedFile && (
-                <div className="info-section">
-                  <h3>Selected File Details</h3>
+                <section className="file-details-section">
+                  <h3>File Details</h3>
                   <div className="file-details">
-                    <div className="detail-item">
+                    <div className="detail-row">
                       <label>Path:</label>
-                      <code>{selectedFile.path || '/'}</code>
+                      <code>{selectedFile.path}</code>
                     </div>
-                    <div className="detail-item">
+                    <div className="detail-row">
                       <label>Source:</label>
                       <span className={`source-badge ${selectedFile.source.toLowerCase()}`}>
                         {selectedFile.source}
                       </span>
                     </div>
-                    <div className="detail-item">
+                    <div className="detail-row">
                       <label>Type:</label>
                       <span>{selectedFile.is_directory ? 'Directory' : 'File'}</span>
                     </div>
-                    {selectedFile.size !== undefined && (
-                      <div className="detail-item">
+                    {selectedFile.size && (
+                      <div className="detail-row">
                         <label>Size:</label>
                         <span>{(selectedFile.size / 1024).toFixed(2)} KB</span>
                       </div>
                     )}
-                    {selectedFile.modified && (
-                      <div className="detail-item">
-                        <label>Modified:</label>
-                        <span>{selectedFile.modified}</span>
-                      </div>
-                    )}
-                    <div className="detail-item">
+                    <div className="detail-row">
                       <label>Writable:</label>
                       <span className={selectedFile.writable ? 'writable' : 'readonly'}>
                         {selectedFile.writable ? 'Yes' : 'No (Base file)'}
                       </span>
                     </div>
                   </div>
-                </div>
+                </section>
               )}
             </div>
-          </div>
+          </>
         ) : (
-          <div className="no-profile-selected">
+          <div className="no-profile">
             <h2>No Profile Selected</h2>
             <p>Create a new profile or select an existing one to get started.</p>
           </div>

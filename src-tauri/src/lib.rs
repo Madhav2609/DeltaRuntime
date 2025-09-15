@@ -7,6 +7,7 @@ pub mod commands;
 pub mod profiles;
 pub mod virtual_fs;
 pub mod blob_cache;
+pub mod workspace_watcher;
 
 use commands::SettingsState;
 
@@ -23,26 +24,25 @@ pub fn run() {
   tauri::Builder::default()
     .manage(SettingsState::new(None))
     .invoke_handler(tauri::generate_handler![
-      commands::load_settings,
-      commands::needs_wizard,
-      commands::validate_gta_base_path,
-      commands::get_drive_info,
-      commands::create_data_structure,
-      commands::validate_settings,
-      commands::get_settings,
-      commands::open_data_root,
-      commands::open_gta_base,
-      commands::pick_directory,
-      commands::create_profile,
-      commands::list_profiles,
-      commands::rename_profile,
-      commands::delete_profile,
-      commands::open_profile_workspace,
-      commands::get_virtual_file_tree,
-      commands::delete_virtual_file,
-      commands::copy_to_workspace,
-      commands::restore_deleted_file
-    ])
+            commands::load_settings,
+            commands::needs_wizard,
+            commands::validate_gta_base_path,
+            commands::get_drive_info,
+            commands::create_data_structure,
+            commands::validate_settings,
+            commands::get_settings,
+            commands::open_data_root,
+            commands::open_gta_base,
+            commands::pick_directory,
+            commands::create_profile,
+            commands::list_profiles,
+            commands::rename_profile,
+            commands::delete_profile,
+            commands::open_profile_workspace,
+            commands::get_virtual_file_tree,
+            commands::revert_to_original,
+            commands::copy_to_workspace
+        ])
     .setup(|_app| {
       // Setup complete - our logging is already initialized
       tracing::info!("Tauri app setup complete");
