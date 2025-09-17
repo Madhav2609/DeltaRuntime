@@ -152,8 +152,8 @@ impl WorkspaceWatcher {
         self.watcher = Some(watcher);
         self.event_sender = Some(tx);
 
-        // Normalize any existing files in the workspace before starting to watch
-        Self::normalize_existing_files(&self.profile_name, &self.workspace_path, &self.cache)?;
+        // // Normalize any existing files in the workspace before starting to watch
+        // Self::normalize_existing_files(&self.profile_name, &self.workspace_path, &self.cache)?;
 
         // Start the debounce thread
         let profile_name = self.profile_name.clone();
@@ -316,42 +316,42 @@ impl WorkspaceWatcher {
 
     /// Normalize all existing files in workspace when watcher starts
     /// This ensures that manually copied files are converted to hardlinks
-    pub fn normalize_existing_files(
-        profile_name: &str,
-        workspace_path: &Path,
-        cache: &BlobCache,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        info!("Starting normalization of existing files in workspace: {}", workspace_path.display());
+    // pub fn normalize_existing_files(
+    //     profile_name: &str,
+    //     workspace_path: &Path,
+    //     cache: &BlobCache,
+    // ) -> Result<(), Box<dyn std::error::Error>> {
+    //     info!("Starting normalization of existing files in workspace: {}", workspace_path.display());
         
-        if !workspace_path.exists() {
-            debug!("Workspace path does not exist, skipping normalization: {}", workspace_path.display());
-            return Ok(());
-        }
+    //     if !workspace_path.exists() {
+    //         debug!("Workspace path does not exist, skipping normalization: {}", workspace_path.display());
+    //         return Ok(());
+    //     }
         
-        let mut normalized_count = 0;
-        let mut total_files = 0;
+    //     let mut normalized_count = 0;
+    //     let mut total_files = 0;
         
-        Self::normalize_directory_recursive(
-            workspace_path, 
-            workspace_path, 
-            profile_name, 
-            cache, 
-            &mut normalized_count,
-            &mut total_files
-        )?;
+    //     Self::normalize_directory_recursive(
+    //         workspace_path, 
+    //         workspace_path, 
+    //         profile_name, 
+    //         cache, 
+    //         &mut normalized_count,
+    //         &mut total_files
+    //     )?;
         
-        if total_files == 0 {
-            info!("No files found in workspace for profile '{}'", profile_name);
-        } else if normalized_count > 0 {
-            info!("Normalized {} out of {} existing files in workspace for profile '{}'", 
-                  normalized_count, total_files, profile_name);
-        } else {
-            info!("All {} files in workspace for profile '{}' were already normalized", 
-                  total_files, profile_name);
-        }
+    //     if total_files == 0 {
+    //         info!("No files found in workspace for profile '{}'", profile_name);
+    //     } else if normalized_count > 0 {
+    //         info!("Normalized {} out of {} existing files in workspace for profile '{}'", 
+    //               normalized_count, total_files, profile_name);
+    //     } else {
+    //         info!("All {} files in workspace for profile '{}' were already normalized", 
+    //               total_files, profile_name);
+    //     }
         
-        Ok(())
-    }
+    //     Ok(())
+    // }
 
     /// Recursively normalize files in a directory
     fn normalize_directory_recursive(
@@ -483,7 +483,19 @@ impl WorkspaceWatcher {
         let blob_path = cache.ensure_blob(file_path)?;
         let new_hash = blob_path.hash;
 
-        // Add reference for this profile
+        // Remove any existing reference for this profile+rel_path combination
+        // This handles both file modifications and ensures no duplicate references
+        if let Ok(Some(old_hash)) = cache.remove_existing_ref(profile_name, &rel_path_str) {
+            if old_hash != new_hash {
+                info!("Cleaned up old blob reference: {} | {} -> {} | Profile: {}", 
+                      rel_path_str, 
+                      old_hash.to_hex()[..8].to_string(),
+                      new_hash.to_hex()[..8].to_string(),
+                      profile_name);
+            }
+        }
+
+        // Add reference for this profile with the new blob
         cache.add_ref(&blob_path, profile_name, &rel_path_str)?;
 
         // Replace file with hardlink to blob
@@ -509,31 +521,21 @@ impl WorkspaceWatcher {
         let rel_path = file_path.strip_prefix(workspace_path)?;
         let rel_path_str = rel_path.to_string_lossy().to_string();
 
-        // Find the blob that was referenced by this profile and path
-        if let Ok(blob_hash) = Self::find_blob_by_reference(cache, profile_name, &rel_path_str) {
-            // Create a BlobPath so we can call remove_ref
-            let blob_path = crate::blob_cache::BlobPath {
-                hash: blob_hash,
-                path: cache.get_blob_path(&blob_hash),
-            };
-            
-            // Remove the reference and check if blob should be GC'd
-            match cache.remove_ref(&blob_path, profile_name, &rel_path_str) {
-                Ok(should_gc) => {
-                    info!("File deleted from workspace: {} | Profile: {} | Should GC: {}", 
-                          rel_path_str, profile_name, should_gc);
-                    
-                    if should_gc {
-                        debug!("Blob {} eligible for garbage collection", blob_hash.to_hex()[..8].to_string());
-                    }
-                }
-                Err(e) => {
-                    warn!("Failed to remove blob reference for deleted file {}: {}", rel_path_str, e);
-                }
+        // Remove any existing reference for this profile+rel_path and handle cleanup
+        match cache.remove_existing_ref(profile_name, &rel_path_str) {
+            Ok(Some(old_hash)) => {
+                info!("File deleted from workspace: {} | {} | Profile: {}", 
+                      rel_path_str, 
+                      old_hash.to_hex()[..8].to_string(),
+                      profile_name);
             }
-        } else {
-            // No reference found - this is fine, file might not have been normalized yet
-            debug!("No blob reference found for deleted file: {} | Profile: {}", rel_path_str, profile_name);
+            Ok(None) => {
+                // No reference found - this is fine, file might not have been normalized yet
+                debug!("No blob reference found for deleted file: {} | Profile: {}", rel_path_str, profile_name);
+            }
+            Err(e) => {
+                warn!("Failed to remove blob reference for deleted file {}: {}", rel_path_str, e);
+            }
         }
         
         Ok(())

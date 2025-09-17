@@ -5,6 +5,7 @@ use std::io::{self, Read};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
+use log::{warn, debug};
 
 /// Represents a blob path in the cache
 #[derive(Debug, Clone)]
@@ -220,6 +221,74 @@ impl BlobCache {
         
         Ok(index.refs.get(&hash_str).cloned().unwrap_or_default())
     }
+
+    /// Remove any existing reference for a profile+rel_path combination and return the old blob hash if found
+    /// This is used when a file is updated to clean up the old blob reference before adding the new one
+    pub fn remove_existing_ref(&self, profile: &str, rel_path: &str) -> io::Result<Option<Hash>> {
+        let mut index = self.load_index()?;
+        let mut found_hash: Option<Hash> = None;
+        let mut entries_to_remove: Vec<String> = Vec::new();
+
+        // Find and remove any existing reference for this profile+rel_path
+        for (hash_str, refs) in index.refs.iter_mut() {
+            let original_len = refs.len();
+            refs.retain(|r| !(r.profile == profile && r.rel_path == rel_path));
+            
+            // If we removed a reference, record the hash
+            if refs.len() < original_len {
+                if let Ok(hash) = Hash::from_hex(hash_str) {
+                    found_hash = Some(hash);
+                }
+                
+                // If no references left for this blob, mark for removal
+                if refs.is_empty() {
+                    entries_to_remove.push(hash_str.clone());
+                }
+            }
+        }
+
+        // Remove empty entries and clean up unreferenced blobs
+        for hash_str in entries_to_remove {
+            index.refs.remove(&hash_str);
+            
+            // Delete the unreferenced blob file
+            if let Ok(hash) = Hash::from_hex(&hash_str) {
+                let blob_path = self.get_blob_path(&hash);
+                if blob_path.exists() {
+                    if let Err(e) = fs::remove_file(&blob_path) {
+                        warn!("Failed to delete unreferenced blob {}: {}", hash_str, e);
+                    } else {
+                        debug!("Deleted unreferenced blob: {}", hash_str);
+                    }
+                }
+            }
+        }
+
+        self.save_index(&index)?;
+        Ok(found_hash)
+    }
+
+    /// Manually garbage collect a specific blob if it has no references
+    /// Returns true if the blob was deleted, false if it still has references or doesn't exist
+    pub fn garbage_collect_blob(&self, hash: &Hash) -> io::Result<bool> {
+        let index = self.load_index()?;
+        let hash_str = hash.to_hex().to_string();
+        
+        // Check if blob has any references
+        if index.refs.contains_key(&hash_str) {
+            return Ok(false); // Still has references
+        }
+        
+        // No references, delete the blob file
+        let blob_path = self.get_blob_path(hash);
+        if blob_path.exists() {
+            fs::remove_file(&blob_path)?;
+            debug!("Garbage collected blob: {}", hash_str);
+            return Ok(true);
+        }
+        
+        Ok(false) // Blob file didn't exist
+    }
 }
 
 #[cfg(test)]
@@ -397,6 +466,82 @@ mod tests {
         
         let refs = cache.get_refs(&blob_path).unwrap();
         assert_eq!(refs.len(), 0);
+    }
+
+    #[test]
+    fn test_remove_existing_ref_cross_profile() {
+        let temp_dir = TempDir::new().unwrap();
+        let cache = BlobCache::new(temp_dir.path());
+        
+        // Create two different files with same relative path
+        let file1 = temp_dir.path().join("file1.txt");
+        let file2 = temp_dir.path().join("file2.txt");
+        fs::write(&file1, b"content version 1").unwrap();
+        fs::write(&file2, b"content version 2").unwrap();
+        
+        let blob1 = cache.ensure_blob(&file1).unwrap();
+        let blob2 = cache.ensure_blob(&file2).unwrap();
+        
+        // Add references for both profiles pointing to different blobs for same file
+        cache.add_ref(&blob1, "profile1", "data/config.txt").unwrap();
+        cache.add_ref(&blob2, "profile2", "data/config.txt").unwrap();
+        
+        // Verify both references exist
+        let refs1 = cache.get_refs(&blob1).unwrap();
+        let refs2 = cache.get_refs(&blob2).unwrap();
+        assert_eq!(refs1.len(), 1);
+        assert_eq!(refs2.len(), 1);
+        
+        // Update profile1 to point to blob2 (simulate file change)
+        let old_hash = cache.remove_existing_ref("profile1", "data/config.txt").unwrap();
+        assert_eq!(old_hash, Some(blob1.hash));
+        
+        cache.add_ref(&blob2, "profile1", "data/config.txt").unwrap();
+        
+        // Verify blob1 was cleaned up (no references) and blob2 has both references
+        let refs1_after = cache.get_refs(&blob1).unwrap();
+        let refs2_after = cache.get_refs(&blob2).unwrap();
+        assert_eq!(refs1_after.len(), 0); // blob1 should have no references
+        assert_eq!(refs2_after.len(), 2); // blob2 should have both profiles
+        
+        // Verify blob1 file was deleted by remove_existing_ref
+        assert!(!blob1.path.exists());
+        assert!(blob2.path.exists());
+    }
+
+    #[test]
+    fn test_cross_profile_blob_sharing() {
+        let temp_dir = TempDir::new().unwrap();
+        let cache = BlobCache::new(temp_dir.path());
+        
+        // Create a file
+        let file = temp_dir.path().join("shared.txt");
+        fs::write(&file, b"shared content").unwrap();
+        let blob = cache.ensure_blob(&file).unwrap();
+        
+        // Multiple profiles reference the same blob for same file
+        cache.add_ref(&blob, "profile1", "data/shared.txt").unwrap();
+        cache.add_ref(&blob, "profile2", "data/shared.txt").unwrap();
+        cache.add_ref(&blob, "profile3", "data/shared.txt").unwrap();
+        
+        let refs = cache.get_refs(&blob).unwrap();
+        assert_eq!(refs.len(), 3);
+        
+        // Profile1 changes their version of the file
+        let old_hash = cache.remove_existing_ref("profile1", "data/shared.txt").unwrap();
+        assert_eq!(old_hash, Some(blob.hash));
+        
+        // Blob should still exist because profile2 and profile3 still reference it
+        assert!(blob.path.exists());
+        let refs_after = cache.get_refs(&blob).unwrap();
+        assert_eq!(refs_after.len(), 2);
+        
+        // Clean up remaining references
+        cache.remove_existing_ref("profile2", "data/shared.txt").unwrap();
+        assert!(blob.path.exists()); // Still exists due to profile3
+        
+        cache.remove_existing_ref("profile3", "data/shared.txt").unwrap();
+        assert!(!blob.path.exists()); // Now it should be deleted
     }
 
     #[test]
