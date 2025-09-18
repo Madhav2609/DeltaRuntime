@@ -32,9 +32,12 @@ function ProfileManager({ onOpenWorkspace }: ProfileManagerProps) {
   const [selectedProfile, setSelectedProfile] = useState<string | null>(null);
   const [selectedFile, setSelectedFile] = useState<VirtualNode | null>(null);
   const [virtualTree, setVirtualTree] = useState<VirtualNode | null>(null);
+  const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notification, setNotification] = useState<string | null>(null);
+  const [isBuilding, setIsBuilding] = useState(false);
+  const [buildProgress, setBuildProgress] = useState<any>(null);
 
   useEffect(() => {
     loadProfiles();
@@ -87,10 +90,26 @@ function ProfileManager({ onOpenWorkspace }: ProfileManagerProps) {
         profileName 
       });
       setVirtualTree(tree);
+      // Auto-expand root folder
+      if (tree.path) {
+        setExpandedPaths(new Set([tree.path]));
+      }
     } catch (err) {
       console.error('Failed to load virtual tree:', err);
       setError(err as string);
     }
+  };
+
+  const toggleExpanded = (path: string) => {
+    setExpandedPaths(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(path)) {
+        newSet.delete(path);
+      } else {
+        newSet.add(path);
+      }
+      return newSet;
+    });
   };
 
   const handleCreateProfile = async (name: string) => {
@@ -183,9 +202,67 @@ function ProfileManager({ onOpenWorkspace }: ProfileManagerProps) {
     }
   };
 
+  const handleBuildRuntime = async (profileName: string) => {
+    if (isBuilding) return;
+    
+    setIsBuilding(true);
+    setBuildProgress(null);
+    setError(null);
+    setNotification(`Building runtime for ${profileName}...`);
+
+    try {
+      // Listen for build progress events
+      const unlisten = await listen('build_progress', (event: any) => {
+        setBuildProgress(event.payload);
+        
+        if (event.payload.completed) {
+          if (event.payload.error) {
+            setError(`Build failed: ${event.payload.error}`);
+            setNotification(null);
+          } else {
+            setNotification(`Runtime built successfully for ${profileName}!`);
+            setTimeout(() => setNotification(null), 5000);
+          }
+          setIsBuilding(false);
+          setBuildProgress(null);
+          unlisten();
+        }
+      });
+
+      // Start the build
+      const result = await invoke('build_runtime', {
+        profileName: profileName
+      });
+
+      console.log('Build result:', result);
+    } catch (err) {
+      console.error('Build failed:', err);
+      setError(`Build failed: ${err}`);
+      setIsBuilding(false);
+      setBuildProgress(null);
+      setNotification(null);
+    }
+  };
+
+  const handleComputePlan = async (profileName: string) => {
+    try {
+      setNotification(`Computing runtime plan for ${profileName}...`);
+      const plan = await invoke('compute_runtime_plan', {
+        profileName: profileName
+      });
+      console.log('Runtime plan:', plan);
+      setNotification(`Runtime plan computed: ${(plan as any).total_files} files`);
+      setTimeout(() => setNotification(null), 3000);
+    } catch (err) {
+      console.error('Plan computation failed:', err);
+      setError(`Plan computation failed: ${err}`);
+    }
+  };
+
   const renderFileTree = (node: VirtualNode, depth = 0): React.JSX.Element => {
     const indent = depth * 16;
     const isSelected = selectedFile?.path === node.path;
+    const isExpanded = node.path ? expandedPaths.has(node.path) : true;
     
     return (
       <div key={node.path || node.name}>
@@ -194,6 +271,17 @@ function ProfileManager({ onOpenWorkspace }: ProfileManagerProps) {
           style={{ paddingLeft: `${indent}px` }}
           onClick={() => setSelectedFile(node)}
         >
+          {node.is_directory && (
+            <button 
+              className="expand-button"
+              onClick={(e) => {
+                e.stopPropagation();
+                if (node.path) toggleExpanded(node.path);
+              }}
+            >
+              {isExpanded ? '▼' : '▶'}
+            </button>
+          )}
           <span className="file-icon">
             {node.is_directory ? '📁' : '📄'}
           </span>
@@ -254,7 +342,7 @@ function ProfileManager({ onOpenWorkspace }: ProfileManagerProps) {
             </div>
           )}
         </div>
-        {node.is_directory && node.children && (
+        {node.is_directory && node.children && isExpanded && (
           <div className="file-children">
             {node.children.map(child => renderFileTree(child, depth + 1))}
           </div>
@@ -347,9 +435,42 @@ function ProfileManager({ onOpenWorkspace }: ProfileManagerProps) {
                 >
                   📁 Open Workspace
                 </button>
+                <button 
+                  className="secondary-btn"
+                  onClick={() => handleComputePlan(selectedProfileData.name)}
+                  disabled={isBuilding}
+                >
+                  📋 Compute Plan
+                </button>
+                <button 
+                  className="secondary-btn"
+                  onClick={() => handleBuildRuntime(selectedProfileData.name)}
+                  disabled={isBuilding}
+                >
+                  {isBuilding ? '🔄 Building...' : '🔧 Build Runtime'}
+                </button>
                 <button className="primary-btn">🎮 Launch Game</button>
               </div>
             </header>
+
+            {/* Build Progress */}
+            {buildProgress && (
+              <div className="build-progress">
+                <div className="progress-header">
+                  <h4>Building Runtime - {buildProgress.phase}</h4>
+                  <span>{buildProgress.files_processed} / {buildProgress.total_files} files</span>
+                </div>
+                <div className="progress-bar">
+                  <div 
+                    className="progress-fill" 
+                    style={{ width: `${(buildProgress.files_processed / buildProgress.total_files) * 100}%` }}
+                  ></div>
+                </div>
+                {buildProgress.current_file && (
+                  <div className="current-file">Processing: {buildProgress.current_file}</div>
+                )}
+              </div>
+            )}
             
             <div className="content-sections">
               <section className="virtual-files-section">

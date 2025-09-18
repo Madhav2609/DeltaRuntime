@@ -8,6 +8,8 @@ pub mod profiles;
 pub mod virtual_fs;
 pub mod blob_cache;
 pub mod workspace_watcher;
+pub mod runtime_planner;
+pub mod runtime_builder;
 
 use commands::SettingsState;
 
@@ -43,7 +45,11 @@ pub fn run() {
             commands::revert_to_original,
             commands::copy_to_workspace,
             commands::delete_workspace_file,
-            commands::debug_blob_cache
+            commands::debug_blob_cache,
+            commands::compute_runtime_plan,
+            commands::build_runtime,
+            commands::get_runtime_plan,
+            commands::cleanup_temp_runtimes
         ])
     .setup(|_app| {
       // Setup complete - our logging is already initialized

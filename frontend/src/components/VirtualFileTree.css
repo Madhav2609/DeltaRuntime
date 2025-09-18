@@ -2,10 +2,11 @@
   display: flex;
   flex-direction: column;
   height: 100%;
-  background: white;
-  border: 1px solid #e0e0e0;
+  background: #1e1e1e;
+  border: 1px solid #404040;
   border-radius: 8px;
   overflow: hidden;
+  color: #e0e0e0;
 }
 
 .virtual-file-tree.loading,
@@ -14,6 +15,8 @@
   align-items: center;
   text-align: center;
   padding: 2rem;
+  background: #1e1e1e;
+  color: #e0e0e0;
 }
 
 .tree-header {
@@ -21,13 +24,13 @@
   justify-content: space-between;
   align-items: center;
   padding: 1rem;
-  background: #f8f9fa;
-  border-bottom: 1px solid #e0e0e0;
+  background: #2d2d30;
+  border-bottom: 1px solid #404040;
 }
 
 .tree-header h3 {
   margin: 0;
-  color: #333;
+  color: #e0e0e0;
   font-size: 1.1rem;
 }
 
@@ -41,13 +44,14 @@
   display: flex;
   align-items: center;
   gap: 0.25rem;
-  color: #666;
+  color: #b0b0b0;
 }
 
 .tree-content {
   flex: 1;
   overflow-y: auto;
   padding: 0.5rem 0;
+  background: #1e1e1e;
 }
 
 .virtual-node {
@@ -62,19 +66,20 @@
   transition: background-color 0.15s ease;
   border-radius: 4px;
   margin: 0 0.25rem;
+  color: #e0e0e0;
 }
 
 .node-item:hover {
-  background: #f0f8ff;
+  background: #2d2d30;
 }
 
 .node-item.selected {
-  background: #e3f2fd;
-  border: 1px solid #2196f3;
+  background: #094771;
+  border: 1px solid #0e639c;
 }
 
 .node-item.readonly {
-  color: #666;
+  color: #9e9e9e;
 }
 
 .node-content {
@@ -95,13 +100,14 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #666;
+  color: #b0b0b0;
   flex-shrink: 0;
 }
 
 .expand-button:hover {
-  background: rgba(0, 0, 0, 0.1);
+  background: rgba(255, 255, 255, 0.1);
   border-radius: 2px;
+  color: #e0e0e0;
 }
 
 .node-icon {
@@ -127,7 +133,7 @@
 
 .node-size {
   font-size: 0.8rem;
-  color: #888;
+  color: #9e9e9e;
   flex-shrink: 0;
   min-width: 60px;
   text-align: right;
@@ -138,10 +144,10 @@
 }
 
 .context-menu {
-  background: white;
-  border: 1px solid #ccc;
+  background: #2d2d30;
+  border: 1px solid #404040;
   border-radius: 4px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
   padding: 0.5rem 0;
   min-width: 150px;
 }
@@ -156,20 +162,21 @@
   cursor: pointer;
   font-size: 0.9rem;
   transition: background 0.15s ease;
+  color: #e0e0e0;
 }
 
 .context-menu button:hover {
-  background: #f0f0f0;
+  background: #404040;
 }
 
 .context-menu button.delete-action:hover {
-  background: #ffeaea;
-  color: #d32f2f;
+  background: #5a1f1f;
+  color: #ff6b6b;
 }
 
 .retry-button {
   padding: 0.75rem 1.5rem;
-  background: #007acc;
+  background: #0e639c;
   color: white;
   border: none;
   border-radius: 6px;
@@ -179,14 +186,14 @@
 }
 
 .retry-button:hover {
-  background: #005a99;
+  background: #094771;
 }
 
 .loading-spinner {
   width: 32px;
   height: 32px;
-  border: 3px solid #f3f3f3;
-  border-top: 3px solid #007acc;
+  border: 3px solid #404040;
+  border-top: 3px solid #0e639c;
   border-radius: 50%;
   animation: spin 1s linear infinite;
   margin: 0 auto 1rem;
@@ -203,16 +210,16 @@
 }
 
 .tree-content::-webkit-scrollbar-track {
-  background: #f1f1f1;
+  background: #2d2d30;
 }
 
 .tree-content::-webkit-scrollbar-thumb {
-  background: #c1c1c1;
+  background: #505050;
   border-radius: 4px;
 }
 
 .tree-content::-webkit-scrollbar-thumb:hover {
-  background: #a8a8a8;
+  background: #606060;
 }
 
 /* Responsive adjustments */

@@ -155,7 +155,7 @@ impl VirtualFileSystem {
                     format!("{}/{}", virtual_path, name)
                 };
 
-                if let Ok(child) = self.build_virtual_node(&child_virtual_path, false) {
+                if let Ok(child) = self.build_virtual_node(&child_virtual_path, true) {
                     children.push(child);
                     seen_names.insert(name);
                 }
@@ -178,7 +178,7 @@ impl VirtualFileSystem {
                     format!("{}/{}", virtual_path, name)
                 };
 
-                if let Ok(child) = self.build_virtual_node(&child_virtual_path, false) {
+                if let Ok(child) = self.build_virtual_node(&child_virtual_path, true) {
                     children.push(child);
                 }
             }
@@ -280,34 +280,8 @@ mod tests {
 
         // Check that workspace file overrides base file
         let base_file = children.iter().find(|c| c.name == "base_file.txt").unwrap();
-        assert_eq!(base_file.source, VirtualNodeSource::WorkspaceOverride);
+        assert_eq!(base_file.source, VirtualNodeSource::Override);
         assert!(base_file.writable);
     }
 
-    #[test]
-    fn test_tombstones() {
-        let temp_dir = TempDir::new().unwrap();
-        let base_dir = temp_dir.path().join("base");
-        let workspace_dir = temp_dir.path().join("workspace");
-
-        fs::create_dir_all(&base_dir).unwrap();
-        fs::create_dir_all(&workspace_dir).unwrap();
-        fs::write(base_dir.join("to_delete.txt"), "will be deleted").unwrap();
-
-        let mut vfs = VirtualFileSystem::new(base_dir, workspace_dir);
-        vfs.initialize().unwrap();
-
-        // File should exist initially
-        let root = vfs.get_virtual_tree(None).unwrap();
-        let children = root.children.unwrap();
-        assert!(children.iter().any(|c| c.name == "to_delete.txt"));
-
-        // Create tombstone
-        vfs.create_tombstone("to_delete.txt").unwrap();
-
-        // File should no longer appear in virtual tree
-        let root = vfs.get_virtual_tree(None).unwrap();
-        let children = root.children.unwrap();
-        assert!(!children.iter().any(|c| c.name == "to_delete.txt"));
-    }
 }

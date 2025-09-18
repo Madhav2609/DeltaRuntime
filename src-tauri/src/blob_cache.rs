@@ -131,6 +131,13 @@ impl BlobCache {
             .join(&hash_str)
     }
 
+    /// Get blob path from a hex hash string
+    pub fn get_blob_path_from_hash(&self, hash_str: &str) -> io::Result<PathBuf> {
+        let hash = Hash::from_hex(hash_str)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("Invalid hash: {}", e)))?;
+        Ok(self.get_blob_path(&hash))
+    }
+
     /// Get the index.json path
     fn get_index_path(&self) -> PathBuf {
         self.cache_dir.join("blobs").join("index.json")
@@ -288,6 +295,23 @@ impl BlobCache {
         }
         
         Ok(false) // Blob file didn't exist
+    }
+
+    /// Find the blob hash for a specific profile and relative path
+    /// This is more efficient than re-hashing files that are already tracked
+    pub fn find_blob_hash_for_file(&self, profile: &str, rel_path: &str) -> io::Result<Option<String>> {
+        let index = self.load_index()?;
+        
+        // Search through all blob references to find the one matching our profile + rel_path
+        for (hash_str, refs) in &index.refs {
+            for blob_ref in refs {
+                if blob_ref.profile == profile && blob_ref.rel_path == rel_path {
+                    return Ok(Some(hash_str.clone()));
+                }
+            }
+        }
+        
+        Ok(None)
     }
 }
 

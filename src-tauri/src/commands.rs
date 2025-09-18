@@ -1,7 +1,8 @@
-use tauri::State;
+use tauri::{State, Emitter};
 use std::sync::Mutex;
 use std::path::PathBuf;
 use std::collections::HashMap;
+use std::sync::Arc;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use log::debug;
@@ -11,6 +12,8 @@ use crate::path_utils::{get_drive_letter, is_ntfs_volume, get_free_space, format
 use crate::profiles::{ProfileManager, Profile};
 use crate::virtual_fs::{VirtualFileSystem, VirtualNode};
 use crate::workspace_watcher::WorkspaceWatcher;
+use crate::runtime_planner::{RuntimePlanner, RuntimePlan};
+use crate::runtime_builder::{RuntimeBuilder, BuildProgress, BuildResult};
 use tracing::{info, warn};
 
 /// Application state for settings
@@ -816,7 +819,6 @@ pub async fn copy_to_workspace(
 // Workspace Watcher (Auto-running)
 // =============================================================================
 
-use std::sync::Arc;
 use once_cell::sync::Lazy;
 
 type WatcherRegistry = Arc<Mutex<HashMap<String, crate::workspace_watcher::WorkspaceWatcher>>>;
@@ -869,6 +871,87 @@ async fn ensure_workspace_watcher_running(
     watchers.insert(profile_name.to_string(), watcher);
     
     Ok(())
+}
+
+/// Compute runtime plan for a profile
+#[tauri::command]
+pub async fn compute_runtime_plan(
+    profile_name: String,
+    state: State<'_, SettingsState>
+) -> Result<RuntimePlan, String> {
+    info!("Computing runtime plan for profile: {}", profile_name);
+    
+    let settings_guard = state.lock().map_err(|e| format!("State lock error: {}", e))?;
+    let settings = settings_guard.as_ref()
+        .ok_or("Settings not loaded")?.clone();
+    drop(settings_guard);
+    
+    let planner = RuntimePlanner::new(settings);
+    planner.compute_plan(&profile_name)
+        .map_err(|e| format!("Failed to compute runtime plan: {}", e))
+}
+
+/// Build runtime for a profile with progress updates
+#[tauri::command]
+pub async fn build_runtime(
+    profile_name: String,
+    state: State<'_, SettingsState>,
+    app_handle: tauri::AppHandle
+) -> Result<BuildResult, String> {
+    info!("Building runtime for profile: {}", profile_name);
+    
+    let settings_guard = state.lock().map_err(|e| format!("State lock error: {}", e))?;
+    let settings = settings_guard.as_ref()
+        .ok_or("Settings not loaded")?.clone();
+    drop(settings_guard);
+    
+    let builder = RuntimeBuilder::new(settings);
+    
+    // Create progress callback that emits events to the frontend
+    let app_handle_clone = app_handle.clone();
+    let progress_callback = Arc::new(move |progress: BuildProgress| {
+        if let Err(e) = app_handle_clone.emit("build_progress", &progress) {
+            warn!("Failed to emit build progress: {}", e);
+        }
+    });
+    
+    builder.build_runtime(&profile_name, Some(progress_callback))
+        .map_err(|e| format!("Failed to build runtime: {}", e))
+}
+
+/// Get or load existing runtime plan for a profile
+#[tauri::command]
+pub async fn get_runtime_plan(
+    profile_name: String,
+    state: State<'_, SettingsState>
+) -> Result<Option<RuntimePlan>, String> {
+    info!("Getting runtime plan for profile: {}", profile_name);
+    
+    let settings_guard = state.lock().map_err(|e| format!("State lock error: {}", e))?;
+    let settings = settings_guard.as_ref()
+        .ok_or("Settings not loaded")?.clone();
+    drop(settings_guard);
+    
+    let planner = RuntimePlanner::new(settings);
+    planner.load_plan(&profile_name)
+        .map_err(|e| format!("Failed to load runtime plan: {}", e))
+}
+
+/// Clean up temporary runtime directories
+#[tauri::command]
+pub async fn cleanup_temp_runtimes(
+    state: State<'_, SettingsState>
+) -> Result<(), String> {
+    info!("Cleaning up temporary runtime directories");
+    
+    let settings_guard = state.lock().map_err(|e| format!("State lock error: {}", e))?;
+    let settings = settings_guard.as_ref()
+        .ok_or("Settings not loaded")?.clone();
+    drop(settings_guard);
+    
+    let builder = RuntimeBuilder::new(settings);
+    builder.cleanup_temp_runtimes()
+        .map_err(|e| format!("Failed to cleanup temp runtimes: {}", e))
 }
 
 /// Stop workspace watcher for a profile (called when switching profiles)
